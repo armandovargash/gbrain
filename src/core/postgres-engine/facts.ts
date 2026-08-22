@@ -435,11 +435,14 @@ export async function listSupersessions(
 
 export async function countUnconsolidatedFacts(deps: PgFactsDeps, source_id: string): Promise<number> {
     const sql = deps.sql;
+    // Audit checkpoint rows never set consolidated_at, so without the source
+    // exclusion each one counts as forever-pending consolidation backlog.
     const rows = await sql<{ count: number }[]>`
       SELECT COUNT(*)::int AS count FROM facts
       WHERE source_id = ${source_id}
         AND consolidated_at IS NULL
         AND expired_at IS NULL
+        AND source != ALL(${AUDIT_ROW_SOURCES}::text[])
     `;
     return Number(rows[0]?.count ?? 0);
   }
