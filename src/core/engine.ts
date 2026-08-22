@@ -1474,11 +1474,12 @@ export interface BrainEngine {
     opts?: RelationalFanoutOpts,
   ): Promise<RelationalFanoutRow[]>;
   /**
-   * For a list of slugs, return how many inbound links each has.
+   * For a list of page ids, return how many inbound links each has.
    * Used by hybrid search backlink boost. Single SQL query, not N+1.
-   * Slugs with zero inbound links are present in the map with value 0.
+   * Keyed by page id — NOT slug — so namesake slugs across sources never
+   * share or sum counts (#4380). Ids with zero links map to 0.
    */
-  getBacklinkCounts(slugs: string[]): Promise<Map<string, number>>;
+  getBacklinkCounts(pageIds: number[]): Promise<Map<number, number>>;
   /**
    * v0.40.4 — for a list of page_ids, return adjacency aggregates
    * restricted to the subgraph induced by them. Returns ALL pages with

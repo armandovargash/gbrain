@@ -3640,10 +3640,10 @@ export class PostgresEngine implements BrainEngine {
     }));
   }
 
-  async getBacklinkCounts(slugs: string[]): Promise<Map<string, number>> {
-    const result = new Map<string, number>();
-    if (slugs.length === 0) return result;
-    for (const s of slugs) result.set(s, 0);
+  async getBacklinkCounts(pageIds: number[]): Promise<Map<number, number>> {
+    const result = new Map<number, number>();
+    if (pageIds.length === 0) return result;
+    for (const id of pageIds) result.set(id, 0);
 
     // v0.41.18.0 D12: filter mentions OUT of backlink-count for search
     // ranking. `link_source='mentions'` rows are auto-linked body-text
@@ -3653,17 +3653,19 @@ export class PostgresEngine implements BrainEngine {
     // --by-mention run, boosting popular-mention pages over intentional-
     // backlink pages. `IS DISTINCT FROM` is NULL-safe so legacy rows with
     // NULL link_source still count (NULL != 'mentions' → row included).
+    // #4380: keyed by p.id, not slug — grouping by bare slug summed every
+    // namesake's backlinks across sources, boosting zero-backlink pages.
     const sql = this.sql;
     const rows = await sql`
-      SELECT p.slug as slug, COUNT(l.id)::int as cnt
+      SELECT p.id as page_id, COUNT(l.id)::int as cnt
       FROM pages p
       LEFT JOIN links l ON l.to_page_id = p.id
         AND l.link_source IS DISTINCT FROM 'mentions'
-      WHERE p.slug = ANY(${slugs}::text[])
-      GROUP BY p.slug
+      WHERE p.id = ANY(${pageIds}::int[])
+      GROUP BY p.id
     `;
-    for (const r of rows as unknown as { slug: string; cnt: number }[]) {
-      result.set(r.slug, Number(r.cnt));
+    for (const r of rows as unknown as { page_id: number; cnt: number }[]) {
+      result.set(Number(r.page_id), Number(r.cnt));
     }
     return result;
   }

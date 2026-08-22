@@ -237,7 +237,7 @@ async function assembleCard(
   // [ship P1.2] Incoming edges + backlink_count are SOURCE-SAFE on BOTH sides.
   // engine.getBacklinks(slug,{sourceId}) only scopes the TARGET page's source,
   // so a foreign-source page linking to a same-named entity would leak its
-  // slug; engine.getBacklinkCounts has no source param at all. We instead run
+  // slug; engine.getBacklinkCounts counts inbound from ALL sources. We run
   // a both-sides-scoped query here (f.source_id = t.source_id = this source),
   // mentions excluded (matching the backlink-count convention). Outgoing edges
   // (getLinks) are the entity's OWN declared links — from-side scoped — so they
