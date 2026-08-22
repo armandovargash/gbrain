@@ -871,6 +871,18 @@ export async function runThink(
     for (const w of resolved.warnings) warnings.push(w);
   }
 
+  // #4376: close resolved citations against the gathered evidence — a cited
+  // slug absent from every gather stream is unverifiable provenance. Warn-only;
+  // the never-fail synthesis contract (cite-render.ts) stays intact.
+  const gatheredSlugs = new Set<string>([
+    ...gather.pages.map(p => p.slug),
+    ...gather.takes.map(t => t.page_slug),
+    ...gather.graphSlugs,
+  ]);
+  for (const slug of new Set(resolved.citations.map(c => c.page_slug))) {
+    if (!gatheredSlugs.has(slug)) warnings.push(`CITATION_NOT_IN_GATHER:${slug}`);
+  }
+
   // Round-loop scaffolding (rounds > 1 currently re-runs without gap-driven retrieval).
   // The loop is in place so the v0.29 gap-fill heuristic doesn't change the call site.
   for (let r = 1; r < rounds; r++) {
