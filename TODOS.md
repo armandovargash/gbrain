@@ -61,12 +61,11 @@
   Per-source `gbrain sync --source X` delegates today, so this is convenience,
   not capability. Start: `src/commands/sync-delegate.ts` (the `--all` refusal),
   `src/core/serve-sync-runner.ts`. Effort: M (CC: S). Priority: P3.
-- [ ] **P3 — `serve --http` sync IPC.** **What:** register the resolve-IPC
-  listener (and the sync kinds) on the HTTP serve path. **Why:** delegation is
-  stdio-serve-only — an HTTP serve still forces stop-the-serve syncs.
-  **Context:** `src/commands/serve-http.ts` is at its module-size cap; the
-  wiring needs its own module. The IPC block in `src/mcp/server.ts:186` is the
-  shape to extract/share. Effort: M (CC: S). Priority: P3.
+- [x] **P3 — `serve --http` sync IPC.** DONE (#4474): the stdio IPC block is
+  extracted to `src/mcp/resolve-ipc-binding.ts` (`bindResolveIpcForServe`) and
+  both serve transports bind it — resolve/turn_context/context_pack AND the
+  sync/sweep kinds now work under `serve --http`. Pinned by
+  `test/resolve-ipc-binding.test.ts`.
 - [ ] **P3 — delegated post-sync steps.** **What:** the direct-CLI post-steps
   (`manageGitignoreAtGitRoot`, the extraction-lag nudge) don't run for
   delegated syncs. **Why:** both need an engine or repo-adjacent context the
