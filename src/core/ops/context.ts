@@ -600,6 +600,81 @@ export function federatedSearchScope(
 }
 
 /**
+ * #4109 — preflight a page endpoint for a same-source graph mutation
+ * (add_link / add_timeline_entry).
+ *
+ * These ops intentionally write only to `ctx.sourceId`, while page reads may
+ * span the caller's federated visibility scope. When the requested slug
+ * exists only in another READABLE source, report that source boundary
+ * explicitly (`permission_denied`) instead of the misleading "not found" the
+ * engine's exact-source resolution emits — which surfaced over MCP as
+ * `internal_error` and made intentional source isolation look like data
+ * loss. Sources outside the caller's read grant remain indistinguishable
+ * from absence: the diagnostic lookup uses `federatedSearchScope`, the SAME
+ * visibility ladder as `get_page`, so this preflight can never become a
+ * cross-source existence oracle.
+ */
+export async function requireWritablePage(
+  ctx: OperationContext,
+  slug: string,
+  operation: string,
+  endpoint: 'from' | 'to' | 'page',
+): Promise<void> {
+  const writeSource = ctx.sourceId || 'default';
+  // Graph rows may reference soft-deleted pages — includeDeleted preserves
+  // that engine mutation contract for the exact write source. The federated
+  // diagnostic lookup below intentionally stays active-page-only so a
+  // soft-deleted foreign page is never disclosed.
+  const writable = await ctx.engine.getPage(slug, {
+    sourceId: writeSource,
+    includeDeleted: true,
+  });
+  if (writable) return;
+
+  const visibleScope = federatedSearchScope(ctx);
+  const spansAnotherSource =
+    (visibleScope.sourceIds?.some((sourceId) => sourceId !== writeSource) ?? false) ||
+    (visibleScope.sourceId !== undefined && visibleScope.sourceId !== writeSource);
+  if (spansAnotherSource) {
+    const visible = await ctx.engine.getPage(slug, visibleScope);
+    if (visible && visible.source_id !== writeSource) {
+      throw new OperationError(
+        'permission_denied',
+        `${operation}${endpoint === 'page' ? '' : ` ${endpoint}`} page "${slug}" is readable from source "${visible.source_id}" but this client writes to source "${writeSource}".`,
+        'Graph mutations are same-source by design. Use a client whose write source owns the page, or import the page into your write source first.',
+      );
+    }
+  }
+
+  throw new OperationError(
+    'page_not_found',
+    `${operation}${endpoint === 'page' ? '' : ` ${endpoint}`} page "${slug}" was not found in writable source "${writeSource}".`,
+  );
+}
+
+/**
+ * #4109 — reclassify a typed engine miss (PageMissingError) raised by the
+ * mutation itself, after `requireWritablePage` already passed: the page was
+ * hard-deleted between preflight and mutation. Re-running the preflight
+ * regenerates the same permission_denied / page_not_found envelope; if the
+ * page reappeared between those reads (restore race), fall through to a
+ * deterministic miss instead of leaking the raw engine error as
+ * internal_error.
+ */
+export async function reclassifyMutationTimePageMiss(
+  ctx: OperationContext,
+  slug: string,
+  operation: string,
+  endpoint: 'from' | 'to' | 'page',
+): Promise<never> {
+  await requireWritablePage(ctx, slug, operation, endpoint);
+  throw new OperationError(
+    'page_not_found',
+    `${operation}${endpoint === 'page' ? '' : ` ${endpoint}`} page "${slug}" was unavailable in writable source "${ctx.sourceId || 'default'}" during the mutation.`,
+  );
+}
+
+/**
  * Code-intel adapter for `resolveRequestedScope`. Graph traversal
  * (code_callers/code_callees/code_blast/code_flow) is single-source by design —
  * the engine APIs and the traversal cache key take ONE `sourceId` string, not a

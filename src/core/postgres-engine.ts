@@ -89,6 +89,7 @@ import { privatePagesFilterFragment } from './search/private-visibility.ts';
 import { unverifiedExtractionFragment } from './extraction-review.ts';
 import { DEFAULT_EMBEDDING_MODEL, DEFAULT_EMBEDDING_DIMENSIONS } from './ai/defaults.ts';
 import { DELETE_BATCH_SIZE } from './engine-constants.ts';
+import { PageMissingError } from './engine-errors.ts';
 import { SOURCE_CONFIG_OBJECT_SQL } from './source-config-sql.ts';
 import { shouldExcludeFromOrphanReporting, loadOrphanPolicyOverrides } from './orphan-policy.ts';
 import { LINK_EXTRACTOR_VERSION_TS } from './link-extraction.ts';
@@ -2926,36 +2927,41 @@ export class PostgresEngine implements BrainEngine {
     const toSrc = opts?.toSourceId ?? 'default';
     const originSrc = opts?.originSourceId ?? 'default';
 
-    // Pre-check existence so we can throw a clear error (ON CONFLICT DO UPDATE
-    // returns 0 rows when source SELECT is empty, indistinguishable from missing
-    // page). Source-qualified — pre-v0.18 the bare slug check matched ANY source,
-    // letting addLink succeed even when the intended source row was missing.
-    const exists = await sql`
-      SELECT 1 FROM pages WHERE slug = ${from} AND source_id = ${fromSrc}
-      INTERSECT
-      SELECT 1 FROM pages WHERE slug = ${to} AND source_id = ${toSrc}
-    `;
-    if (exists.length === 0) {
-      throw new Error(`addLink failed: page "${from}" (source=${fromSrc}) or "${to}" (source=${toSrc}) not found`);
-    }
     // Default link_source to 'markdown' for back-compat with pre-v0.13 callers.
-    // Mirror addLinksBatch's VALUES + JOIN-on-(slug, source_id) shape. The old
-    // `FROM pages f, pages t` cross-product fanned out across every source
-    // containing either slug, so a multi-source brain silently created edges
-    // pointing at the wrong pages.
     const src = linkSource ?? 'markdown';
-    await sql`
-      INSERT INTO links (from_page_id, to_page_id, link_type, context, link_source, origin_page_id, origin_field)
-      SELECT f.id, t.id, v.link_type, v.context, v.link_source, o.id, v.origin_field
-      FROM (VALUES (${from}, ${to}, ${linkType || ''}, ${sanitizeForJsonb(context || '')}, ${src}, ${originSlug ?? null}, ${originField ?? null}, ${fromSrc}, ${toSrc}, ${originSrc}))
-        AS v(from_slug, to_slug, link_type, context, link_source, origin_slug, origin_field, from_source_id, to_source_id, origin_source_id)
-      JOIN pages f ON f.slug = v.from_slug AND f.source_id = v.from_source_id
-      JOIN pages t ON t.slug = v.to_slug AND t.source_id = v.to_source_id
-      LEFT JOIN pages o ON o.slug = v.origin_slug AND o.source_id = v.origin_source_id
-      ON CONFLICT (from_page_id, to_page_id, link_type, link_source, origin_page_id) DO UPDATE SET
-        context = EXCLUDED.context,
-        origin_field = EXCLUDED.origin_field
+    // #4109: resolve both required endpoints and upsert from ONE statement
+    // snapshot — a separate pre-check raced concurrent hard deletes (a delete
+    // winning between check and insert made a zero-row upsert look like
+    // success). The lookups stay source-qualified per endpoint (JOIN-on-
+    // (slug, source_id), not the pre-v0.18 cross-product that fanned out
+    // across sources containing either slug). FOR KEY SHARE makes a
+    // concurrent hard delete linearize around the mutation: a delete that
+    // wins first is observed as a missing endpoint; a mutation that wins
+    // first holds the referenced rows through the insert instead of leaking
+    // a raw FK violation.
+    const [result] = await sql`
+      WITH endpoint_state AS (
+        SELECT
+          (SELECT id FROM pages WHERE slug = ${from} AND source_id = ${fromSrc} FOR KEY SHARE) AS from_id,
+          (SELECT id FROM pages WHERE slug = ${to} AND source_id = ${toSrc} FOR KEY SHARE) AS to_id,
+          (SELECT id FROM pages WHERE slug = ${originSlug ?? null} AND source_id = ${originSrc} FOR KEY SHARE) AS origin_id
+      ), upserted AS (
+        INSERT INTO links (from_page_id, to_page_id, link_type, context, link_source, origin_page_id, origin_field)
+        SELECT s.from_id, s.to_id, ${linkType || ''}, ${sanitizeForJsonb(context || '')}, ${src}, s.origin_id, ${originField ?? null}
+        FROM endpoint_state s
+        WHERE s.from_id IS NOT NULL AND s.to_id IS NOT NULL
+        ON CONFLICT (from_page_id, to_page_id, link_type, link_source, origin_page_id) DO UPDATE SET
+          context = EXCLUDED.context,
+          origin_field = EXCLUDED.origin_field
+        RETURNING 1
+      )
+      SELECT
+        endpoint_state.from_id IS NOT NULL AS from_exists,
+        endpoint_state.to_id IS NOT NULL AS to_exists
+      FROM endpoint_state
     `;
+    if (!result?.from_exists) throw new PageMissingError('addLink', 'from', from, fromSrc);
+    if (!result.to_exists) throw new PageMissingError('addLink', 'to', to, toSrc);
   }
 
   async addLinksBatch(links: LinkBatchInput[], opts?: BatchOpts): Promise<number> {
@@ -3928,31 +3934,38 @@ export class PostgresEngine implements BrainEngine {
   ): Promise<boolean> {
     const sql = this.sql;
     const sourceId = opts?.sourceId ?? 'default';
-    if (!opts?.skipExistenceCheck) {
-      const exists = await sql`SELECT 1 FROM pages WHERE slug = ${slug} AND source_id = ${sourceId}`;
-      if (exists.length === 0) {
-        throw new Error(`addTimelineEntry failed: page "${slug}" (source=${sourceId}) not found`);
-      }
-    }
-    // ON CONFLICT DO NOTHING via the (page_id, date, md5(summary), source)
-    // unique index (#3737: md5-keyed so long summaries fit the btree row cap).
-    // #3827: RETURNING 1 makes the outcome observable — 0 rows means either
-    // page missing OR duplicate; with the existence check above (default) the
-    // false return unambiguously means "deduplicated", and under
-    // skipExistenceCheck the caller asserts the page exists. Source-qualify
-    // the page-id lookup so multi-source brains don't fan timeline rows out
-    // across every source containing the slug.
+    // #4109: page resolution and insertion share ONE statement snapshot, so a
+    // concurrent hard delete linearizes before the lookup (missing) or after
+    // the insert (success) instead of surfacing a raw FK violation; FOR KEY
+    // SHARE holds the referenced row through the insert. ON CONFLICT DO
+    // NOTHING via the (page_id, date, md5(summary), source) unique index
+    // (#3737: md5-keyed so long summaries fit the btree row cap).
+    // #3827: the `inserted` flag makes the outcome observable — with the
+    // page_exists throw below (default) a false return unambiguously means
+    // "deduplicated", and under skipExistenceCheck the caller asserts the
+    // page exists. Source-qualify the page-id lookup so multi-source brains
+    // don't fan timeline rows out across every source containing the slug.
     // Free-text body fields are NUL + lone-surrogate sanitized (#2011) so a
     // surrogate from sliced/imported content can't reach the (later) ::jsonb
     // batch path or corrupt the row; identity fields (slug, date) are left raw.
-    const inserted = await sql`
-      INSERT INTO timeline_entries (page_id, date, source, summary, detail)
-      SELECT id, ${entry.date}::date, ${sanitizeForJsonb(entry.source || '')}, ${sanitizeForJsonb(entry.summary)}, ${sanitizeForJsonb(entry.detail || '')}
-      FROM pages WHERE slug = ${slug} AND source_id = ${sourceId}
-      ON CONFLICT (page_id, date, md5(summary), source) DO NOTHING
-      RETURNING 1
+    const [result] = await sql`
+      WITH page_state AS (
+        SELECT id FROM pages WHERE slug = ${slug} AND source_id = ${sourceId} FOR KEY SHARE
+      ), inserted AS (
+        INSERT INTO timeline_entries (page_id, date, source, summary, detail)
+        SELECT id, ${entry.date}::date, ${sanitizeForJsonb(entry.source || '')}, ${sanitizeForJsonb(entry.summary)}, ${sanitizeForJsonb(entry.detail || '')}
+        FROM page_state
+        ON CONFLICT (page_id, date, md5(summary), source) DO NOTHING
+        RETURNING 1
+      )
+      SELECT
+        EXISTS(SELECT 1 FROM page_state) AS page_exists,
+        EXISTS(SELECT 1 FROM inserted) AS inserted
     `;
-    return inserted.length > 0;
+    if (!result?.page_exists && !opts?.skipExistenceCheck) {
+      throw new PageMissingError('addTimelineEntry', 'page', slug, sourceId);
+    }
+    return result?.inserted === true;
   }
 
   async addTimelineEntriesBatch(entries: TimelineBatchInput[], opts?: BatchOpts): Promise<number> {

@@ -58,6 +58,7 @@ import { hnswEfSearchFor, hnswIndexExpected, HNSW_EF_SEARCH_MAX } from './vector
 import { PGLITE_SCHEMA_SQL, getPGLiteSchema } from './pglite-schema.ts';
 import { DEFAULT_EMBEDDING_MODEL, DEFAULT_EMBEDDING_DIMENSIONS } from './ai/defaults.ts';
 import { DELETE_BATCH_SIZE } from './engine-constants.ts';
+import { PageMissingError } from './engine-errors.ts';
 import { SOURCE_CONFIG_OBJECT_SQL } from './source-config-sql.ts';
 import { MARKDOWN_CHUNKER_VERSION } from './chunkers/recursive.ts';
 import { acquireLock, releaseLock, type LockHandle } from './pglite-lock.ts';
@@ -3685,33 +3686,38 @@ export class PGLiteEngine implements BrainEngine {
     const toSrc = opts?.toSourceId ?? 'default';
     const originSrc = opts?.originSourceId ?? 'default';
 
-    // Source-qualified pre-check gives a clean missing-page error before the
-    // INSERT SELECT path can silently return zero rows.
-    const exists = await this.db.query(
-      `SELECT 1 FROM pages WHERE slug = $1 AND source_id = $2
-       INTERSECT
-       SELECT 1 FROM pages WHERE slug = $3 AND source_id = $4`,
-      [from, fromSrc, to, toSrc]
-    );
-    if (exists.rows.length === 0) {
-      throw new Error(`addLink failed: page "${from}" (source=${fromSrc}) or "${to}" (source=${toSrc}) not found`);
-    }
     const src = linkSource ?? 'markdown';
-    // Mirror addLinksBatch's VALUES + composite JOIN shape. The old cross-
-    // product over pages f/t fanned out across sources containing the slugs.
-    await this.db.query(
-      `INSERT INTO links (from_page_id, to_page_id, link_type, context, link_source, origin_page_id, origin_field)
-       SELECT f.id, t.id, v.link_type, v.context, v.link_source, o.id, v.origin_field
-       FROM (VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10))
-         AS v(from_slug, to_slug, link_type, context, link_source, origin_slug, origin_field, from_source_id, to_source_id, origin_source_id)
-       JOIN pages f ON f.slug = v.from_slug AND f.source_id = v.from_source_id
-       JOIN pages t ON t.slug = v.to_slug AND t.source_id = v.to_source_id
-       LEFT JOIN pages o ON o.slug = v.origin_slug AND o.source_id = v.origin_source_id
-       ON CONFLICT (from_page_id, to_page_id, link_type, link_source, origin_page_id) DO UPDATE SET
-         context = EXCLUDED.context,
-         origin_field = EXCLUDED.origin_field`,
-      [from, to, linkType || '', sanitizeForJsonb(context || ''), src, originSlug ?? null, originField ?? null, fromSrc, toSrc, originSrc]
+    // #4109: mirrors PostgresEngine — resolve both required endpoints and
+    // upsert from one statement snapshot, reporting the missing endpoint
+    // individually. Lookups stay source-qualified per endpoint (not the old
+    // cross-product over pages f/t that fanned out across sources containing
+    // the slugs). No FOR KEY SHARE here: PGLite is single-writer in-process,
+    // so no concurrent session can delete between lookup and insert.
+    const result = await this.db.query<{ from_exists: boolean; to_exists: boolean }>(
+      `WITH endpoint_state AS (
+         SELECT
+           (SELECT id FROM pages WHERE slug = $1 AND source_id = $2) AS from_id,
+           (SELECT id FROM pages WHERE slug = $3 AND source_id = $4) AS to_id,
+           (SELECT id FROM pages WHERE slug = $5 AND source_id = $6) AS origin_id
+       ), upserted AS (
+         INSERT INTO links (from_page_id, to_page_id, link_type, context, link_source, origin_page_id, origin_field)
+         SELECT s.from_id, s.to_id, $7, $8, $9, s.origin_id, $10
+         FROM endpoint_state s
+         WHERE s.from_id IS NOT NULL AND s.to_id IS NOT NULL
+         ON CONFLICT (from_page_id, to_page_id, link_type, link_source, origin_page_id) DO UPDATE SET
+           context = EXCLUDED.context,
+           origin_field = EXCLUDED.origin_field
+         RETURNING 1
+       )
+       SELECT
+         endpoint_state.from_id IS NOT NULL AS from_exists,
+         endpoint_state.to_id IS NOT NULL AS to_exists
+       FROM endpoint_state`,
+      [from, fromSrc, to, toSrc, originSlug ?? null, originSrc, linkType || '', sanitizeForJsonb(context || ''), src, originField ?? null]
     );
+    const row = result.rows[0];
+    if (!row?.from_exists) throw new PageMissingError('addLink', 'from', from, fromSrc);
+    if (!row.to_exists) throw new PageMissingError('addLink', 'to', to, toSrc);
   }
 
   async addLinksBatch(links: LinkBatchInput[], opts?: BatchOpts): Promise<number> {
@@ -4660,33 +4666,37 @@ export class PGLiteEngine implements BrainEngine {
     opts?: { skipExistenceCheck?: boolean; sourceId?: string },
   ): Promise<boolean> {
     const sourceId = opts?.sourceId ?? 'default';
-    if (!opts?.skipExistenceCheck) {
-      const { rows } = await this.db.query(
-        'SELECT 1 FROM pages WHERE slug = $1 AND source_id = $2',
-        [slug, sourceId]
-      );
-      if (rows.length === 0) {
-        throw new Error(`addTimelineEntry failed: page "${slug}" (source=${sourceId}) not found`);
-      }
-    }
-    // ON CONFLICT DO NOTHING via the (page_id, date, md5(summary), source)
-    // unique index (#3737: md5-keyed so long summaries fit the btree row cap).
-    // #3827: RETURNING 1 makes the outcome observable (true = inserted,
-    // false = deduplicated or JOIN-dropped under skipExistenceCheck),
-    // mirroring the Postgres engine. Source-qualify the page-id lookup so
-    // multi-source brains don't fan timeline rows out across every source
-    // containing the slug.
+    // #4109: mirrors PostgresEngine — page resolution and insertion share one
+    // statement snapshot so the miss is typed (PageMissingError) rather than
+    // inferred from a zero-row insert. ON CONFLICT DO NOTHING via the
+    // (page_id, date, md5(summary), source) unique index (#3737: md5-keyed so
+    // long summaries fit the btree row cap).
+    // #3827: the `inserted` flag makes the outcome observable (true =
+    // inserted, false = deduplicated, or page missing under
+    // skipExistenceCheck), mirroring the Postgres engine. Source-qualify the
+    // page-id lookup so multi-source brains don't fan timeline rows out
+    // across every source containing the slug.
     // Free-text body fields are NUL + lone-surrogate sanitized (#2011), matching
     // the batch path and the Postgres engine; identity fields (slug, date) raw.
-    const { rows: inserted } = await this.db.query(
-      `INSERT INTO timeline_entries (page_id, date, source, summary, detail)
-       SELECT id, $2::date, $3, $4, $5
-       FROM pages WHERE slug = $1 AND source_id = $6
-       ON CONFLICT (page_id, date, md5(summary), source) DO NOTHING
-       RETURNING 1`,
+    const result = await this.db.query<{ page_exists: boolean; inserted: boolean }>(
+      `WITH page_state AS (
+         SELECT id FROM pages WHERE slug = $1 AND source_id = $6
+       ), inserted AS (
+         INSERT INTO timeline_entries (page_id, date, source, summary, detail)
+         SELECT id, $2::date, $3, $4, $5
+         FROM page_state
+         ON CONFLICT (page_id, date, md5(summary), source) DO NOTHING
+         RETURNING 1
+       )
+       SELECT
+         EXISTS(SELECT 1 FROM page_state) AS page_exists,
+         EXISTS(SELECT 1 FROM inserted) AS inserted`,
       [slug, entry.date, sanitizeForJsonb(entry.source || ''), sanitizeForJsonb(entry.summary), sanitizeForJsonb(entry.detail || ''), sourceId]
     );
-    return inserted.length > 0;
+    if (!result.rows[0]?.page_exists && !opts?.skipExistenceCheck) {
+      throw new PageMissingError('addTimelineEntry', 'page', slug, sourceId);
+    }
+    return result.rows[0]?.inserted === true;
   }
 
   async addTimelineEntriesBatch(entries: TimelineBatchInput[], opts?: BatchOpts): Promise<number> {
