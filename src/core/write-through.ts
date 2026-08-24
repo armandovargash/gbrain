@@ -418,3 +418,73 @@ export async function writePageThrough(
     return { written: false, error: msg };
   }
 }
+
+export interface DeleteThroughResult {
+  /** True when an artifact existed and was unlinked. */
+  removed: boolean;
+  /** The path that was removed (or would have been). */
+  path?: string;
+  /**
+   * Non-error reasons nothing was removed. Shares the target-resolution skip
+   * vocabulary (kept in lockstep via the Extract), plus:
+   *   - disabled_by_config: the operator opted the brain out of the disk sink.
+   *   - file_not_present: the page had no artifact on disk (DB-only page, or
+   *     already removed by hand) — a clean no-op, not a failure.
+   */
+  skipped?: 'disabled_by_config' | 'file_not_present' | Extract<PageWriteTarget, { ok: false }>['skipped'];
+  /** Set when the unlink itself threw (EACCES, EPERM, read-only mount). */
+  error?: string;
+}
+
+/**
+ * Remove the on-disk markdown artifact for `slug` — the delete-side counterpart
+ * to `writePageThrough` (#4022).
+ *
+ * Why this exists: `put_page`/capture write BOTH sinks (DB row + `.md` file),
+ * but `delete_page` used to touch only the DB. The orphaned file then outlived
+ * the page, and on any repo whose brain is committed on a timer (a `snapshot`
+ * cron, `sources harden`'s post-commit push) the deleted page's artifact gets
+ * committed back into git *after* deletion — so the page reappears on the next
+ * `gbrain sync`, silently resurrecting content the user deleted.
+ *
+ * Deliberately mirrors `writePageThrough`'s contract: never throws, reports via
+ * `skipped`/`error`, and resolves its target through the shared
+ * `resolvePageWriteTarget` so the two planes cannot disagree about which file
+ * backs a page. The DB row remains the durable sink — a failure here leaves a
+ * stale file that the next `gbrain sync` reconciles, never a lost row.
+ *
+ * `opts.target`: resolvePageWriteTarget reads the recorded `source_path` from
+ * ACTIVE rows only, so the delete_page op resolves the target BEFORE
+ * `softDeletePage` stamps `deleted_at` and passes it here. Resolving after the
+ * stamp would miss the recorded path, fall back to the slug-derived twin, and
+ * report a clean `file_not_present` no-op while the REAL artifact stayed on
+ * disk — the very silent-no-op class this helper exists to close.
+ */
+export async function deletePageThrough(
+  engine: BrainEngine,
+  slug: string,
+  opts: { sourceId?: string; logger?: WriteThroughLogger; target?: PageWriteTarget } = {},
+): Promise<DeleteThroughResult> {
+  const sourceId = opts.sourceId ?? 'default';
+  try {
+    // `sync.write_through=false` means the operator opted this brain out of
+    // the disk sink entirely — never unlink files gbrain does not own.
+    if (await isWriteThroughDisabled(engine)) {
+      return { removed: false, skipped: 'disabled_by_config' };
+    }
+    const target = opts.target ?? await resolvePageWriteTarget(engine, slug, sourceId);
+    if (!target.ok) return { removed: false, skipped: target.skipped };
+    const { filePath } = target;
+
+    if (!existsSync(filePath)) {
+      return { removed: false, path: filePath, skipped: 'file_not_present' };
+    }
+
+    unlinkSync(filePath);
+    return { removed: true, path: filePath };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    opts.logger?.warn(`[write-through] delete failed for ${slug}: ${msg}`);
+    return { removed: false, error: msg };
+  }
+}

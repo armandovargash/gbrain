@@ -14,9 +14,13 @@ import * as os from 'node:os';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { resetGateway } from '../src/core/ai/gateway.ts';
-import { writePageThrough, isWriteThroughDisabled, _resetWriteThroughCacheForTest } from '../src/core/write-through.ts';
+import {
+  writePageThrough, deletePageThrough, resolvePageWriteTarget,
+  isWriteThroughDisabled, _resetWriteThroughCacheForTest,
+} from '../src/core/write-through.ts';
 import { importFromContent } from '../src/core/import-file.ts';
 import { serializePageToMarkdown, resolvePageFilePath } from '../src/core/markdown.ts';
+import { operations, type OperationContext } from '../src/core/operations.ts';
 
 let engine: PGLiteEngine;
 let tmpRoot: string;
@@ -483,5 +487,173 @@ describe('writePageThrough', () => {
     const files = walkFiles(brainDir);
     expect(files.some((f) => f.endsWith('.md'))).toBe(false);
     expect(files.some((f) => f.includes('.tmp.'))).toBe(false);
+  });
+});
+
+describe('deletePageThrough (#4022)', () => {
+  // The leak this closes: delete_page was DB-only, so the artifact outlived the
+  // page. On any brain committed on a timer (snapshot cron, hardened
+  // post-commit push) the orphan got committed AFTER deletion and the next
+  // `gbrain sync` resurrected the page.
+  test('removes the artifact written by writePageThrough (path parity)', async () => {
+    await engine.setConfig('sync.repo_path', brainDir);
+    const slug = 'concepts/delete-me';
+    await seedPage(slug);
+
+    const written = await writePageThrough(engine, slug, { sourceId: 'default' });
+    expect(written.written).toBe(true);
+    expect(fs.existsSync(written.path!)).toBe(true);
+
+    const removed = await deletePageThrough(engine, slug, { sourceId: 'default' });
+    expect(removed.removed).toBe(true);
+    // Path parity is the whole point of the shared resolver: a delete that
+    // computed the path differently would miss the file (leaving the orphan)
+    // or unlink the wrong one.
+    expect(removed.path).toBe(written.path);
+    expect(fs.existsSync(written.path!)).toBe(false);
+  });
+
+  test('missing artifact is a clean no-op, not an error', async () => {
+    await engine.setConfig('sync.repo_path', brainDir);
+    const slug = 'concepts/db-only-page';
+    await seedPage(slug);
+
+    const res = await deletePageThrough(engine, slug, { sourceId: 'default' });
+    expect(res.removed).toBe(false);
+    expect(res.skipped).toBe('file_not_present');
+    expect(res.error).toBeUndefined();
+  });
+
+  test('no repo configured → skipped, never throws', async () => {
+    // sync.repo_path deliberately unset (DB-only brain by design).
+    const slug = 'concepts/no-repo';
+    await seedPage(slug);
+
+    const res = await deletePageThrough(engine, slug, { sourceId: 'default' });
+    expect(res.removed).toBe(false);
+    expect(res.skipped).toBe('no_repo_configured');
+  });
+
+  test('sync.write_through=false → skipped disabled_by_config, file untouched', async () => {
+    await engine.setConfig('sync.repo_path', brainDir);
+    const slug = 'concepts/opted-out';
+    await seedPage(slug);
+    const written = await writePageThrough(engine, slug, { sourceId: 'default' });
+    expect(written.written).toBe(true);
+
+    // The operator opted the brain out of the disk sink — the delete plane
+    // must not start unlinking files gbrain no longer owns.
+    await engine.setConfig('sync.write_through', 'false');
+    _resetWriteThroughCacheForTest();
+
+    const res = await deletePageThrough(engine, slug, { sourceId: 'default' });
+    expect(res).toEqual({ removed: false, skipped: 'disabled_by_config' });
+    expect(fs.existsSync(written.path!)).toBe(true);
+  });
+
+  test('a pre-stamp target keeps the recorded source_path reachable after soft-delete', async () => {
+    await engine.setConfig('sync.repo_path', brainDir);
+    const slug = 'library/people/ada-lovelace';
+    const authored = 'Library/People/Ada Lovelace.md';
+    await importFromContent(engine, slug, `---\ntitle: Ada Lovelace\ntype: person\n---\n\n# Body\n`, {
+      noEmbed: true,
+      sourceId: 'default',
+      sourcePath: authored,
+    });
+    const written = await writePageThrough(engine, slug, { sourceId: 'default' });
+    expect(written.path).toBe(path.join(brainDir, authored));
+
+    // resolvePageWriteTarget reads source_path from ACTIVE rows only, so the
+    // delete plane resolves the target BEFORE softDeletePage stamps
+    // deleted_at; a post-stamp resolution would fall back to the slug-derived
+    // twin, report a clean file_not_present no-op, and leave the REAL
+    // artifact on disk for the next timer-based commit to resurrect.
+    const target = await resolvePageWriteTarget(engine, slug, 'default');
+    await engine.softDeletePage(slug, { sourceId: 'default' });
+
+    const removed = await deletePageThrough(engine, slug, { sourceId: 'default', target });
+    expect(removed.removed).toBe(true);
+    expect(removed.path).toBe(path.join(brainDir, authored));
+    expect(fs.existsSync(path.join(brainDir, authored))).toBe(false);
+  });
+});
+
+describe('delete_page / restore_page write-through symmetry (#4022)', () => {
+  const delete_page = operations.find((o) => o.name === 'delete_page')!;
+  const restore_page = operations.find((o) => o.name === 'restore_page')!;
+
+  function ctxOf(overrides: Partial<OperationContext> = {}): OperationContext {
+    return {
+      engine: engine as any,
+      config: { engine: 'pglite' } as any,
+      logger: { info() {}, warn() {}, error() {} },
+      dryRun: false,
+      remote: false,
+      sourceId: 'default',
+      ...overrides,
+    } as OperationContext;
+  }
+
+  test('[REGRESSION resurrect] delete_page removes the recorded source_path artifact', async () => {
+    await engine.setConfig('sync.repo_path', brainDir);
+    const slug = 'library/people/grace-hopper';
+    const authored = 'Library/People/Grace Hopper.md';
+    await importFromContent(engine, slug, `---\ntitle: Grace Hopper\ntype: person\n---\n\n# Body\n`, {
+      noEmbed: true,
+      sourceId: 'default',
+      sourcePath: authored,
+    });
+    const written = await writePageThrough(engine, slug, { sourceId: 'default' });
+    expect(written.path).toBe(path.join(brainDir, authored));
+
+    const res = await delete_page.handler(ctxOf(), { slug }) as Record<string, any>;
+
+    expect(res.status).toBe('soft_deleted');
+    // Pre-fix the delete was DB-only: the authored `.md` survived, the next
+    // timer-based commit pushed it back into git, and `gbrain sync`
+    // re-imported it — resurrecting the page the user deleted.
+    expect(fs.existsSync(path.join(brainDir, authored))).toBe(false);
+    expect(res.write_through?.removed).toBe(true);
+    expect(res.write_through?.path).toBe(path.join(brainDir, authored));
+  });
+
+  test('restore_page re-renders the artifact (sync --full must not re-delete the restored page)', async () => {
+    await engine.setConfig('sync.repo_path', brainDir);
+    const slug = 'concepts/round-trip';
+    await seedPage(slug);
+    const written = await writePageThrough(engine, slug, { sourceId: 'default' });
+    expect(fs.existsSync(written.path!)).toBe(true);
+
+    const del = await delete_page.handler(ctxOf(), { slug }) as Record<string, any>;
+    expect(del.write_through?.removed).toBe(true);
+    expect(fs.existsSync(written.path!)).toBe(false);
+
+    const res = await restore_page.handler(ctxOf(), { slug }) as Record<string, any>;
+
+    expect(res.status).toBe('restored');
+    // Without the re-render a restored page has a DB row and no artifact, and
+    // `sync --full` delete-reconcile treats the missing file as a user
+    // deletion — silently re-deleting the page the user just restored.
+    expect(res.write_through?.written).toBe(true);
+    expect(fs.existsSync(written.path!)).toBe(true);
+  });
+
+  test('sandbox subagents stay DB-only on both planes (matches put_page trust gate)', async () => {
+    await engine.setConfig('sync.repo_path', brainDir);
+    const slug = 'concepts/sandboxed';
+    await seedPage(slug);
+    const written = await writePageThrough(engine, slug, { sourceId: 'default' });
+    expect(fs.existsSync(written.path!)).toBe(true);
+
+    const sandboxCtx = ctxOf({ viaSubagent: true });
+    const del = await delete_page.handler(sandboxCtx, { slug }) as Record<string, any>;
+    expect(del.status).toBe('soft_deleted');
+    expect(del.write_through?.skipped).toBe('subagent_sandbox');
+    // The DB row is soft-deleted but the sandboxed caller never touches disk.
+    expect(fs.existsSync(written.path!)).toBe(true);
+
+    const rest = await restore_page.handler(sandboxCtx, { slug }) as Record<string, any>;
+    expect(rest.status).toBe('restored');
+    expect(rest.write_through?.skipped).toBe('subagent_sandbox');
   });
 });
