@@ -715,6 +715,53 @@ export function resolveCodeIntelScope(
 }
 
 /**
+ * Federated re-route for the graph four (code_callers / code_callees /
+ * code_blast / code_flow) — the #3242 sibling. An UNQUALIFIED graph query from
+ * a no-grant caller collapses to the scalar seed source (usually 'default'),
+ * which on vault+code brains holds no code — so the graph ops report
+ * `not_built` while code_def / code_refs (which widen across
+ * `ctx.localFederatedSourceIds`) answer fine. Graph traversal must stay
+ * single-source (engine API + cache key take ONE sourceId), so instead of
+ * widening we RE-ROUTE: when the collapsed source has no code chunks and
+ * exactly one source in the caller's federated read set does, traverse that
+ * one — the multi-source cousin of the CLI's `sole_non_default` tier (#1434).
+ *
+ * Fail-closed, in order: never fires when the caller passed `source_id` or
+ * `all_sources` (explicit wins), when the scope is already brain-wide, when a
+ * grant is present (`ctx.auth.allowedSources` governs — same guard as
+ * `federatedSearchScope`), when there is no federated read set (a granted
+ * token never widens), when the collapsed source itself has code, or when
+ * zero or 2+ federated sources have code (ambiguous → original scope stands
+ * and readiness reports honestly). Probe errors also keep the original scope.
+ */
+export async function routeCodeIntelScope(
+  ctx: OperationContext,
+  sourceIdParam: string | undefined,
+  allSourcesParam = false,
+): Promise<{ allSources: boolean; sourceId?: string }> {
+  const scope = resolveCodeIntelScope(ctx, sourceIdParam, allSourcesParam);
+  if (
+    sourceIdParam !== undefined || allSourcesParam ||
+    scope.allSources || scope.sourceId === undefined ||
+    ctx.auth?.allowedSources !== undefined ||
+    !ctx.localFederatedSourceIds || ctx.localFederatedSourceIds.length < 2
+  ) {
+    return scope;
+  }
+  try {
+    const { codeChunksExist } = await import('../code-graph-readiness.ts');
+    if (await codeChunksExist(ctx.engine, scope.sourceId)) return scope;
+    const withCode: string[] = [];
+    for (const id of ctx.localFederatedSourceIds) {
+      if (id === scope.sourceId) continue;
+      if (await codeChunksExist(ctx.engine, id)) withCode.push(id);
+    }
+    if (withCode.length === 1) return { allSources: false, sourceId: withCode[0] };
+  } catch { /* probe failure → original scope stands */ }
+  return scope;
+}
+
+/**
  * T4/D5 — resolve a per-call search-mode override. Honored ONLY for trusted/
  * local callers (ctx.remote === false) so a remote OAuth client can't escalate
  * to the costly tokenmax bundle. Local + unknown mode → loud reject; remote +
