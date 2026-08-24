@@ -79,6 +79,7 @@ import { createHash } from 'crypto';
 import { runSlidingPool } from '../core/worker-pool.ts';
 import { isAborted } from '../core/abort-check.ts';
 import { parseWorkers, resolveWorkersWithClamp } from '../core/sync-concurrency.ts';
+import { loadAllSources } from '../core/sources-load.ts';
 
 // Batch size for addLinksBatch / addTimelineEntriesBatch.
 // Postgres bind-parameter limit is 65535. Links use 4 cols/row → 16K hard ceiling;
@@ -198,7 +199,7 @@ function refsWithSnapshotStamps(
  * then picks from_source_id / to_source_id: prefer the origin page's source,
  * fall back to 'default', else skip (never push a wrong-source edge). Shared
  * by extractLinksFromDB and extractStaleFromDB so the F10 multi-source
- * resolution can't drift.
+ * resolution and the source-isolation policy can't drift.
  *
  * v0.46.28.0 (#2589): the failure case now carries a `reason` instead of a
  * bare `null`. A target that resolves via `global_basename` to a page that
@@ -208,6 +209,11 @@ function refsWithSnapshotStamps(
  * exist". This stays default-deny by design: cross-source edges remain
  * unwritten (source isolation — see CLAUDE.md), but callers can now
  * attribute the drop correctly instead of reporting a wrong reason.
+ *
+ * #3478: only a federated origin source may fall back to 'default'; when
+ * `allowCrossSource` is false both endpoints must live in the page's own
+ * source, else skip with reason 'cross_source' (never push a wrong-source
+ * edge).
  */
 export type CandidateSourceResolution =
   | { ok: true; fromSlug: string; fromSourceId: string; toSourceId: string }
@@ -219,14 +225,21 @@ export function resolveCandidateSources(
   pageSourceId: string,
   allSlugs: Set<string>,
   slugToSources: Map<string, string[]>,
+  allowCrossSource: boolean,
 ): CandidateSourceResolution {
   const fromSlug = c.fromSlug ?? pageSlug;
   if (!allSlugs.has(c.targetSlug)) return { ok: false, reason: 'missing_target' };
   if (!allSlugs.has(fromSlug)) return { ok: false, reason: 'missing_from' };
   const fromSources = slugToSources.get(fromSlug) ?? [];
+  const targetSources = slugToSources.get(c.targetSlug) ?? [];
+  if (!allowCrossSource) {
+    if (!fromSources.includes(pageSourceId) || !targetSources.includes(pageSourceId)) {
+      return { ok: false, reason: 'cross_source' };
+    }
+    return { ok: true, fromSlug, fromSourceId: pageSourceId, toSourceId: pageSourceId };
+  }
   const fromSourceId = fromSources.includes(pageSourceId) ? pageSourceId
     : (fromSources.includes('default') ? 'default' : fromSources[0]);
-  const targetSources = slugToSources.get(c.targetSlug) ?? [];
   let toSourceId: string;
   if (targetSources.includes(fromSourceId)) {
     toSourceId = fromSourceId;
@@ -1648,6 +1661,12 @@ async function extractLinksFromDB(
   // The resolver maps above are built from the UNFILTERED refs — link
   // targets outside the window must still resolve.
   const walkRefs = filterRefsSince(allRefs, since);
+  // #3478: the 'default' fallback in resolveCandidateSources is a federation
+  // feature — an isolated source must not regrow cross-source edges on every
+  // sweep. Sources absent from the table (or archived) fail closed to isolated.
+  const federatedSourceIds = new Set(
+    (await loadAllSources(engine, { federatedOnly: true })).map(source => source.id),
+  );
   let processed = 0, created = 0;
   // #2576: skipped-candidate counter — see extractStaleFromDB's twin.
   let skippedMissingTarget = 0;
@@ -1706,7 +1725,9 @@ async function extractLinksFromDB(
       // endpoint-validation + from/to source-id picking. #2589: the reason
       // is now distinguished (missing endpoint vs. target only in a
       // non-origin/non-default source) so the two don't get counted as one.
-      const resolved = resolveCandidateSources(c, slug, source_id, allSlugs, slugToSources);
+      const resolved = resolveCandidateSources(
+        c, slug, source_id, allSlugs, slugToSources, federatedSourceIds.has(source_id),
+      );
       if (!resolved.ok) {
         if (resolved.reason === 'cross_source') skippedCrossSource++;
         else skippedMissingTarget++;
@@ -1973,6 +1994,11 @@ export async function extractStaleFromDB(
     list.push(ref.source_id);
     slugToSources.set(ref.slug, list);
   }
+  // #3478: mirrors extractLinksFromDB — only federated sources keep the
+  // cross-source 'default' fallback; absent/archived rows fail closed.
+  const federatedSourceIds = new Set(
+    (await loadAllSources(engine, { federatedOnly: true })).map(source => source.id),
+  );
 
   const progress = createProgress(cliOptsToProgressOptions(getCliOptions()));
   progress.start('extract.stale', totalStale);
@@ -2007,7 +2033,10 @@ export async function extractStaleFromDB(
         { skipFrontmatter: !includeFrontmatter, globalBasename, pack },
       );
       for (const c of extracted.candidates) {
-        const r = resolveCandidateSources(c, page.slug, page.source_id, allSlugs, slugToSources);
+        const r = resolveCandidateSources(
+          c, page.slug, page.source_id, allSlugs, slugToSources,
+          federatedSourceIds.has(page.source_id),
+        );
         if (!r.ok) {
           if (r.reason === 'cross_source') skippedCrossSource++;
           else skippedMissingTarget++;
