@@ -4,6 +4,7 @@ import { homedir } from 'os';
 import type { EngineConfig, EmbeddingColumnConfig } from './types.ts';
 import { applyDbPlaneReadSideMerge, type DbPlaneEngineReader } from './config-db-merge.ts';
 import { loadConfigSnapshot } from './config-snapshot.ts';
+import { loadGbrainEnvFile } from './gbrain-env-file.ts';
 
 /**
  * Where is the active DB URL coming from? Pure introspection, no connection
@@ -636,6 +637,13 @@ export function effectiveEnvDatabaseUrl(dir: string = process.cwd()): string | u
 }
 
 export function loadConfig(): GBrainConfig | null {
+  // #3893 (reimplemented from @y2688): fill process.env from the
+  // operator-owned ~/.gbrain/.env BEFORE the env-over-file merge below, so
+  // secrets can live outside config.json. Shell-exported env always wins
+  // (the loader never overrides an existing var), and cwd .env files stay
+  // untrusted (#427 guard above).
+  loadGbrainEnvFile(getConfigDir);
+
   let fileConfig: GBrainConfig | null = null;
   try {
     const raw = readFileSync(getConfigPath(), 'utf-8');

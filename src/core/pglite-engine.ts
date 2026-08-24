@@ -898,6 +898,28 @@ export class PGLiteEngine implements BrainEngine {
       // finally's releaseLock + dispose.
       await drainBackgroundWorkBeforeDisconnect();
       if (db) {
+        // #3893 (reimplemented from @y2688): best-effort WAL flush BEFORE
+        // close(). A clean close() checkpoints on its own, but the #4143
+        // class below means close can time out or wedge and be abandoned —
+        // an explicit pre-close CHECKPOINT makes the data files current so
+        // an abandoned close loses no committed rows. PGLite-only by design
+        // (no postgres-engine parity twin): a server Postgres owns its own
+        // checkpointer and survives this process dying. Bounded by the same
+        // close timeout and never throwing — a slow or failed CHECKPOINT
+        // must not block teardown. Runs after the drain so it is the only
+        // statement in flight when it executes.
+        let checkpointTimer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          await Promise.race([
+            db.query('CHECKPOINT').catch(() => undefined),
+            new Promise<void>((resolve) => {
+              checkpointTimer = setTimeout(resolve, pgliteCloseTimeoutMs());
+            }),
+          ]);
+        } finally {
+          if (checkpointTimer) clearTimeout(checkpointTimer);
+        }
+
         // Deliberately NOT wrapped in preservingProcessExitCode: close's
         // status write (0) is long-standing baseline behavior that test-runner
         // processes depend on (wrapping it flipped bun test's own exit code —

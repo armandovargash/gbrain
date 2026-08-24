@@ -577,8 +577,11 @@ export async function importFromContent(
         logContentSanityAssessment(slug, sourceId ?? 'default', sanityResult, {
           disposition: 'soft_block',
         });
-        process.stderr.write(
-          `[gbrain] content-sanity flag (oversized): ${slug} (${sanityResult.bytes} bytes) — page lands, embedding skipped, agent warned\n`,
+        // #3893 (reimplemented from @y2688): console.warn, not bare stderr —
+        // soft_block silently drops embedding, and console-level warns are
+        // what operator log hooks and collectors can observe.
+        console.warn(
+          `[gbrain] content-sanity flag (oversized): ${slug} (${sanityResult.bytes} bytes) — page lands, embedding skipped, agent warned`,
         );
       } else {
         // markup_heavy: page ingests NORMALLY (keeps chunks, embeds). The
