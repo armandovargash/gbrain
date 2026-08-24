@@ -25,7 +25,7 @@ src/commands/embed.ts	1949	ratchet	lowered v0.46.26.0: embedBatchWithBackoff + r
 src/core/types.ts	1955	ratchet	grown v0.46.26.0 megawave: EvidenceOpts, pacing/usage result fields, PageFilters growth (#4352 #4218); wave-k: +9 SalienceOpts/AnomaliesOpts source scope (#3867)
 src/commands/skillpack.ts	1360	ratchet
 src/core/minions/queue.ts	2442	ratchet	grown #4078 + megawave probe-liveness unlatch (#4310) + master private-queue lifecycle: recovery classifier + monotonic lease
-src/commands/init.ts	1951	ratchet	grown v0.46.x keyless capability notices; +1 at megawave/wave-k merge
+src/commands/init.ts	1975	ratchet	grown v0.46.x keyless capability notices; +1 at megawave/wave-k merge; #3753 --force re-init engine-preservation guard
 src/commands/integrations.ts	1739	ratchet	grown v0.46.26.0 megawave (#4039 connector compat) + 1 nosemgrep dataflow annotation (path-traversal audit); wave-k: exported heartbeatPath seam (#3900)
 src/core/minions/handlers/subagent.ts	1834	ratchet	merged: master v131 settle rework + dream-wave C5 peel + C6 accounting + C7 lease heartbeats/lost-lease aborts + C9 oneshot dispatch + adversarial fix batches; grown by #4078 subagent-loop capability fix; +6 lines (reasoning-item replay: adaptContentBlocksToChatBlocks handles 'reasoning' blocks); +3 wave G #4514: Anthropic-via-OpenRouter allowed on the subagent loop
 src/commands/bootstrap.ts	2015	ratchet	grandfathered at merge (grew past the 1500 cap on master); raised for #4066 HOME_WORKSPACE_GUARD_EXEMPT (status/uninstall/harness); +5 for the harnessDetect test seam (bulk lives in core/bootstrap/harness.ts)
