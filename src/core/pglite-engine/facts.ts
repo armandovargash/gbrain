@@ -11,6 +11,7 @@ import type {
 import { MAX_SEARCH_LIMIT, clampSearchLimit } from '../engine.ts';
 import { AUDIT_ROW_SOURCES } from '../facts/audit-sources.ts';
 import { resolveSupersededByRow, isInt4RowRef, type SupersedeTarget } from '../facts/supersede-resolve.ts';
+import { escapeLikePattern } from '../cjk.ts';
 
 /** Narrow slice of PGLiteEngine the facts operations use. */
 export interface PgliteFactsDeps {
@@ -639,6 +640,13 @@ async function _listFacts(
     if (opts.visibility && opts.visibility.length > 0) {
       whereParts.push(`visibility = ANY($visibility)`);
       params.visibility = opts.visibility;
+    }
+    if (opts.grep && opts.grep.trim()) {
+      // SQL-side substring filter (before limit) — a client-side post-limit
+      // grep silently misses matches outside the newest-N window on
+      // high-cardinality entities. Parity with the postgres engine.
+      whereParts.push(`fact ILIKE $grepPat ESCAPE '\\'`);
+      params.grepPat = '%' + escapeLikePattern(opts.grep.trim()) + '%';
     }
     for (const c of opts.whereClauses ?? []) whereParts.push(c);
     Object.assign(params, opts.whereParams ?? {});

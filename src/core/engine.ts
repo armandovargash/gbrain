@@ -583,6 +583,15 @@ export interface FactListOpts {
    */
   visibility?: FactVisibility[];
   /**
+   * Case-insensitive substring filter on fact text, applied IN SQL (before
+   * limit). A client-side post-limit grep silently returns nothing for
+   * high-cardinality entities — the match may sit outside the newest-N
+   * window (found by the 2026-08-06 memory eval on an entity with hundreds
+   * of facts). LIKE wildcards in the needle are escaped; plain substring
+   * semantics only.
+   */
+  grep?: string;
+  /**
    * When true, `listFactsSince`'s `since` comparison and ORDER BY use
    * COALESCE(valid_from, created_at) — event time — instead of creation
    * time. Batch backfill (e.g. `extract-conversation-facts` run over many
