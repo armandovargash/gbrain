@@ -37,7 +37,7 @@ import { logBatchRetry as auditLogBatchRetry, logBatchExhausted as auditLogBatch
 import type {
   DomainBankSampleOpts, CorpusSampleOpts, DomainBankRow,
 } from './types.ts';
-import { MAX_SEARCH_LIMIT, clampSearchLimit } from './engine.ts';
+import { DREAM_VERDICT_TTL_SECONDS, MAX_SEARCH_LIMIT, clampSearchLimit } from './engine.ts';
 import { executeRawJsonb, type SqlValue } from './sql-query.ts';
 import { sanitizeForJsonb, sanitizeText, buildLinkRows, buildTimelineRows } from './batch-rows.ts';
 import { runMigrations } from './migrate.ts';
@@ -4417,6 +4417,7 @@ export class PostgresEngine implements BrainEngine {
              score, content_type, segments, entities, model, triage_version
       FROM dream_verdicts
       WHERE file_path = ${filePath} AND content_hash = ${contentHash}
+        AND expires_at > now()
     `;
     if (rows.length === 0) return null;
     const r = rows[0];
@@ -4435,12 +4436,16 @@ export class PostgresEngine implements BrainEngine {
 
   async putDreamVerdict(filePath: string, contentHash: string, verdict: DreamVerdictInput): Promise<void> {
     const sql = this.sql;
+    // Expiry is computed server-side (now() + TTL) so it lives on the same
+    // clock as the `expires_at > now()` read predicate and judged_at.
     await sql`
       INSERT INTO dream_verdicts (file_path, content_hash, worth_processing, reasons,
-                                  score, content_type, segments, entities, model, triage_version)
+                                  score, content_type, segments, entities, model, triage_version,
+                                  expires_at)
       VALUES (${filePath}, ${contentHash}, ${verdict.worth_processing}, ${sql.json(verdict.reasons as Parameters<typeof sql.json>[0])},
               ${verdict.score}, ${verdict.content_type}, ${sql.json(verdict.segments as unknown as Parameters<typeof sql.json>[0])},
-              ${sql.json(verdict.entities as Parameters<typeof sql.json>[0])}, ${verdict.model}, ${verdict.triage_version})
+              ${sql.json(verdict.entities as Parameters<typeof sql.json>[0])}, ${verdict.model}, ${verdict.triage_version},
+              now() + make_interval(secs => ${DREAM_VERDICT_TTL_SECONDS}))
       ON CONFLICT (file_path, content_hash) DO UPDATE SET
         worth_processing = EXCLUDED.worth_processing,
         reasons = EXCLUDED.reasons,
@@ -4450,8 +4455,15 @@ export class PostgresEngine implements BrainEngine {
         entities = EXCLUDED.entities,
         model = EXCLUDED.model,
         triage_version = EXCLUDED.triage_version,
-        judged_at = now()
+        judged_at = now(),
+        expires_at = EXCLUDED.expires_at
     `;
+  }
+
+  async sweepDreamVerdicts(): Promise<number> {
+    const sql = this.sql;
+    const result = await sql`DELETE FROM dream_verdicts WHERE expires_at <= now()`;
+    return result.count ?? 0;
   }
 
   // ============================================================

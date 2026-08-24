@@ -433,6 +433,16 @@ export async function runPhaseSynthesize(
       return ok('no transcripts to process', { transcripts_processed: 0, pages_written: 0 });
     }
 
+    // Best-effort housekeeping (#4069): expiry is enforced on reads
+    // regardless, so a sweep failure must not block synthesis when the
+    // database is otherwise usable.
+    try {
+      const swept = await engine.sweepDreamVerdicts();
+      if (swept > 0) process.stderr.write(`[dream] swept ${swept} expired verdict cache row(s)\n`);
+    } catch (e) {
+      process.stderr.write(`[dream] warning: verdict cache sweep failed: ${e instanceof Error ? e.message : String(e)}\n`);
+    }
+
     // Scored triage (#4152): cached in dream_verdicts, judged on miss by the
     // utility-tier model through a bounded pool with a wall-clock miss budget.
     // Provider-aware judge client routes through gateway.chat, so any
@@ -1590,6 +1600,14 @@ export function makeJudgeClient(verdictModel: string): JudgeClient | null {
         system,
         messages,
         maxTokens: params.max_tokens,
+        // DeepSeek v4 thinks by default and bills reasoning as OUTPUT tokens
+        // against max_tokens (recipe thinking_by_default, #4172). The judge
+        // wants only the small JSON verdict, so pin thinking off per-call —
+        // the openai-compatible adapter spreads providerOptions[recipe.id]
+        // into the wire body, where `thinking` is DeepSeek's documented knob.
+        ...(v.parsed.providerId === 'deepseek'
+          ? { providerOptions: { deepseek: { thinking: { type: 'disabled' } } } }
+          : {}),
       });
 
       // Map gateway.ChatResult → Anthropic.Message shape. judgeSignificance

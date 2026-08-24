@@ -463,6 +463,14 @@ export interface DreamVerdict {
   triage_version: number | null;
 }
 
+/**
+ * Lifetime of a cached dream verdict (#4069). `triage_version`/`model` already
+ * invalidate rows semantically; this is the TEMPORAL bound — rows for deleted
+ * or re-hashed transcripts age out, long-lived transcripts re-judge at this
+ * cadence. Mirrored by the '30 days' defaults in migration v138 + schema.sql.
+ */
+export const DREAM_VERDICT_TTL_SECONDS = 30 * 86400;
+
 /** Input shape for putDreamVerdict — judged_at defaults to now() server-side. */
 export interface DreamVerdictInput {
   worth_processing: boolean;
@@ -1834,6 +1842,11 @@ export interface BrainEngine {
   // page-scoped — transcripts being judged aren't pages yet.
   getDreamVerdict(filePath: string, contentHash: string): Promise<DreamVerdict | null>;
   putDreamVerdict(filePath: string, contentHash: string, verdict: DreamVerdictInput): Promise<void>;
+  /**
+   * Delete expired dream verdicts; returns rows removed. Best-effort
+   * housekeeping — reads already treat expired rows as misses (#4069).
+   */
+  sweepDreamVerdicts(): Promise<number>;
 
   // ============================================================
   // v0.32.6 Contradiction probe — batched takes fetch + cache + trends

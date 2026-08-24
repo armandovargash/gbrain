@@ -1175,8 +1175,12 @@ CREATE TABLE IF NOT EXISTS dream_verdicts (
   entities         JSONB,
   model            TEXT,
   triage_version   INT,
+  -- #4069 (migration v138): 30-day verdict TTL. Reads treat expired rows as
+  -- misses; the synthesize phase sweeps them best-effort.
+  expires_at       TIMESTAMPTZ NOT NULL DEFAULT (now() + interval '30 days'),
   PRIMARY KEY (file_path, content_hash)
 );
+CREATE INDEX IF NOT EXISTS dream_verdicts_expires_idx ON dream_verdicts (expires_at);
 
 -- ============================================================
 -- Cycle coordination lock — v0.17 runCycle primitive

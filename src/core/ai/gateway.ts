@@ -3316,6 +3316,13 @@ export interface ChatOpts {
   maxTokens?: number;
   abortSignal?: AbortSignal;
   /**
+   * Per-call provider options keyed by recipe id, deep-merged LAST — after
+   * the derived cache markers and configured `provider_chat_options` — so a
+   * call site can pin provider behavior it depends on (e.g. the triage judge
+   * disabling DeepSeek thinking) without config silently overriding it.
+   */
+  providerOptions?: Record<string, Record<string, unknown>>;
+  /**
    * Ask for the stable prefix (system prompt + last tool def) to be cached.
    * Silently ignored on providers whose recipe declares no prompt caching.
    *
@@ -3774,7 +3781,7 @@ export async function chat(opts: ChatOpts): Promise<ChatResult> {
 
   const tools = toAISDKTools(opts.tools);
 
-  const providerOptions: Record<string, any> = {};
+  let providerOptions: Record<string, any> = {};
   if (useCache) {
     // Call-level `providerOptions.anthropic.cacheControl` is NOT a no-op:
     // @ai-sdk/anthropic 3.0.47+ passes it through as a top-level
@@ -3813,6 +3820,8 @@ export async function chat(opts: ChatOpts): Promise<ChatResult> {
     if (promptCacheKey) providerOptions.openai = { promptCacheKey };
   }
   applyConfiguredChatProviderOptions(providerOptions, cfg, recipe.id, modelId);
+  // Call-scoped options merge last so they win over configured siblings.
+  providerOptions = deepMergeRecords(providerOptions, opts.providerOptions);
 
   // Derive ONE canonical cache-control value AFTER config merging and reuse
   // it for every breakpoint (system block, last tool def, call-level). If

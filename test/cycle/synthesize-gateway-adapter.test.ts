@@ -112,10 +112,12 @@ describe('JudgeClient.create — gateway routing + shape adapter', () => {
       let transportCalled = false;
       let receivedSystem: string | undefined;
       let receivedModel: string | undefined;
+      let receivedProviderOptions: Record<string, Record<string, unknown>> | undefined;
       __setChatTransportForTests(async (opts): Promise<ChatResult> => {
         transportCalled = true;
         receivedSystem = opts.system;
         receivedModel = opts.model;
+        receivedProviderOptions = opts.providerOptions;
         return {
           text: WORTH_PROCESSING_JSON,
           blocks: [],
@@ -137,9 +139,47 @@ describe('JudgeClient.create — gateway routing + shape adapter', () => {
       expect(receivedSystem).toBe('judge system prompt');
       // Gateway model gets the anthropic: prefix normalized
       expect(receivedModel).toBe('anthropic:claude-haiku-4-5-20251001');
+      // The thinking-disable pin is DeepSeek-only; other providers must not
+      // receive call-scoped provider options from the judge.
+      expect(receivedProviderOptions).toBeUndefined();
       // Anthropic.Message shape returned
       expect(result.content?.[0]?.type).toBe('text');
       expect((result.content?.[0] as { type: string; text: string }).text).toBe(WORTH_PROCESSING_JSON);
+    });
+  });
+
+  test('A3b: DeepSeek verdict judge disables thinking for its own call only', async () => {
+    // DeepSeek v4 models think by default and bill reasoning as OUTPUT tokens
+    // against max_tokens (recipe thinking_by_default, gbrain#4172). The triage
+    // judge wants the plain JSON verdict, so it pins thinking off per-call via
+    // ChatOpts.providerOptions instead of burning budget on reasoning.
+    // No DEEPSEEK_API_KEY needed: non-anthropic construction skips the key
+    // probe (A9) and the transport is stubbed.
+    const judge = makeJudgeClient('deepseek:deepseek-v4-flash');
+    expect(judge).not.toBeNull();
+
+    let receivedProviderOptions: Record<string, Record<string, unknown>> | undefined;
+    __setChatTransportForTests(async (opts): Promise<ChatResult> => {
+      receivedProviderOptions = opts.providerOptions;
+      return {
+        text: WORTH_PROCESSING_JSON,
+        blocks: [],
+        stopReason: 'end',
+        usage: { input_tokens: 10, output_tokens: 20, cache_read_tokens: 0, cache_creation_tokens: 0 },
+        model: 'deepseek:deepseek-v4-flash',
+        providerId: 'deepseek',
+      };
+    });
+
+    await judge!.create({
+      model: 'deepseek:deepseek-v4-flash',
+      max_tokens: 1024,
+      system: 'judge system prompt',
+      messages: [{ role: 'user', content: 'judge this' }],
+    });
+
+    expect(receivedProviderOptions).toEqual({
+      deepseek: { thinking: { type: 'disabled' } },
     });
   });
 
