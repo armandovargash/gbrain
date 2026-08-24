@@ -104,6 +104,38 @@ describe('makeJudgeClient — construction-time provider probe', () => {
 });
 
 describe('JudgeClient.create — gateway routing + shape adapter', () => {
+  test('A2b (#4077): forwards a caller AbortSignal to gateway.chat', async () => {
+    await withEnv({ ANTHROPIC_API_KEY: 'sk-test-A2b' }, async () => {
+      const judge = makeJudgeClient('claude-haiku-4-5-20251001');
+      expect(judge).not.toBeNull();
+      const abort = new AbortController();
+      let receivedSignal: AbortSignal | undefined;
+      __setChatTransportForTests(async (opts): Promise<ChatResult> => {
+        receivedSignal = opts.abortSignal;
+        return {
+          text: WORTH_PROCESSING_JSON,
+          blocks: [],
+          stopReason: 'end',
+          usage: { input_tokens: 10, output_tokens: 20, cache_read_tokens: 0, cache_creation_tokens: 0 },
+          model: 'test:stub',
+          providerId: 'test',
+        };
+      });
+
+      await judge!.create({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 200,
+        system: 'judge system prompt',
+        messages: [{ role: 'user', content: 'judge this' }],
+      }, { signal: abort.signal });
+
+      // The exact caller signal must reach the transport — a cancelled cycle
+      // has to be able to tear down an in-flight judge call, not just skip
+      // the next one.
+      expect(receivedSignal).toBe(abort.signal);
+    });
+  });
+
   test('A3: routes through gateway.chat (verified via __setChatTransportForTests stub)', async () => {
     await withEnv({ ANTHROPIC_API_KEY: 'sk-test-A3' }, async () => {
       const judge = makeJudgeClient('claude-haiku-4-5-20251001');
