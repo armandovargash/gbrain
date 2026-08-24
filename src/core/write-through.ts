@@ -196,8 +196,43 @@ export async function isWriteThroughDisabled(engine: BrainEngine): Promise<boole
 
 /** Resolved disk target for a page's canonical markdown artifact. */
 export type PageWriteTarget =
-  | { ok: true; filePath: string; writeRoot: string }
+  | {
+      ok: true;
+      filePath: string;
+      writeRoot: string;
+      /**
+       * `filePath` expressed in the file scanner's `pages.source_path`
+       * convention (#774: git-root-relative when the scan root sits inside a
+       * git repo, scan-root-relative otherwise; forward slashes). What
+       * writePageThrough binds onto a source_path=NULL row after the file
+       * materializes (#4247).
+       */
+      sourcePathToBind: string;
+    }
   | { ok: false; skipped: 'no_repo_configured' | 'repo_not_found' | 'source_repo_belongs_to_other_source' | 'path_escapes_source_root' };
+
+/**
+ * Scanner-convention `pages.source_path` for a file under `scanRoot` (the
+ * root a sync of this source walks). Mirrors sync's #774 rule — a scan root
+ * INSIDE a git repo records GIT-ROOT-relative paths (scoped sync), a git-root
+ * or non-git root records root-relative — and must stay the exact inverse of
+ * `resolveSourceLocalFilePath` (markdown.ts): delete-reconcile keys on this
+ * form, so a local_path-relative bind for a subdirectory-scoped source would
+ * read as stale and sweep the page while its file is still on disk.
+ */
+function scannerSourcePath(scanRoot: string, filePath: string): string {
+  const absRoot = resolve(scanRoot);
+  let cursor = absRoot;
+  while (true) {
+    if (existsSync(join(cursor, '.git'))) {
+      return relative(cursor, resolve(filePath)).replaceAll('\\', '/');
+    }
+    const parent = dirname(cursor);
+    if (parent === cursor) break;
+    cursor = parent;
+  }
+  return relative(absRoot, resolve(filePath)).replaceAll('\\', '/');
+}
 
 /**
  * Compute the ONE file a (source, slug) pair lives in on disk.
@@ -242,6 +277,7 @@ export async function resolvePageWriteTarget(
 ): Promise<PageWriteTarget> {
   let filePath: string;
   let writeRoot: string;
+  let scanRoot: string;
   const srcRows = await engine.executeRaw<{ local_path: string | null }>(
     `SELECT local_path FROM sources WHERE id = $1`,
     [sourceId],
@@ -269,6 +305,7 @@ export async function resolvePageWriteTarget(
       ? resolveSourceLocalFilePath(sourceLocalPath, recordedPath) ?? join(sourceLocalPath, `${slug}.md`)
       : join(sourceLocalPath, recordedPathFromFileUri(recordedUri, sourceLocalPath) ?? `${slug}.md`); // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal -- result passes isWriteTargetContained before any write (#4204/#4289 guard)
     writeRoot = sourceLocalPath;
+    scanRoot = sourceLocalPath;
   } else {
     const repoPath = await engine.getConfig('sync.repo_path');
     if (!repoPath) {
@@ -290,6 +327,9 @@ export async function resolvePageWriteTarget(
     const knownPath = recordedPath ?? recordedPathFromFileUri(recordedUri, pageRoot);
     filePath = knownPath ? join(pageRoot, knownPath) : resolvePageFilePath(repoPath, slug, sourceId);
     writeRoot = repoPath;
+    // pageRoot, not repoPath: a later `sources add --path <pageRoot>` scan
+    // walks pageRoot, so the bind must speak that scan's convention.
+    scanRoot = pageRoot;
   }
 
   // Defense-in-depth (#1647-slug / codex #6): confirm the computed file path
@@ -301,7 +341,7 @@ export async function resolvePageWriteTarget(
     return { ok: false, skipped: 'path_escapes_source_root' };
   }
 
-  return { ok: true, filePath, writeRoot };
+  return { ok: true, filePath, writeRoot, sourcePathToBind: scannerSourcePath(scanRoot, filePath) };
 }
 
 /**
@@ -329,7 +369,7 @@ export async function writePageThrough(
     if (!target.ok) {
       return { written: false, skipped: target.skipped };
     }
-    const { filePath, writeRoot } = target;
+    const { filePath, writeRoot, sourcePathToBind } = target;
 
     const writtenPage = await engine.getPage(slug, { sourceId });
     if (!writtenPage) {
@@ -386,6 +426,26 @@ export async function writePageThrough(
         // best-effort cleanup; surface the original write error below
       }
       throw writeErr;
+    }
+
+    // #4247: a page born via put/capture/reverse-write keeps source_path=NULL
+    // forever — mtime-watermark incremental sync never rescans an untouched
+    // file — so bind the just-materialized file of record now. NULL-guarded so
+    // a scanner-recorded path is never rewritten; best-effort because row and
+    // file are already durable and a full sync can still heal the bookkeeping.
+    try {
+      await engine.executeRaw(
+        `UPDATE pages
+            SET source_path = $1
+          WHERE source_id = $2
+            AND slug = $3
+            AND deleted_at IS NULL
+            AND source_path IS NULL`,
+        [sourcePathToBind, sourceId, slug],
+      );
+    } catch (bindErr) {
+      const msg = bindErr instanceof Error ? bindErr.message : String(bindErr);
+      opts.logger?.warn(`[write-through] wrote ${slug} but could not bind source_path: ${msg}`);
     }
 
     // #2426: on a durability-hardened repo (user ran `gbrain sources harden`),

@@ -151,7 +151,7 @@ describe('writePageThrough', () => {
     expect(walkFiles(brainDir).sort()).toEqual([path.join(brainDir, authored)]);
   });
 
-  test('[REGRESSION twin] null source_path still falls back to the slug-derived path', async () => {
+  test('[REGRESSION twin] null source_path falls back to the slug path and binds it immediately (#4247)', async () => {
     await engine.setConfig('sync.repo_path', brainDir);
     const slug = 'inbox/2026-01-01-abc123';
     // Born via put/capture: no file of record, so source_path stays NULL.
@@ -164,6 +164,14 @@ describe('writePageThrough', () => {
 
     expect(res.written).toBe(true);
     expect(res.path).toBe(resolvePageFilePath(brainDir, slug, 'default'));
+    // #4247: the just-materialized file IS the file of record — mtime-watermark
+    // incremental sync never rescans an untouched file, so without an immediate
+    // bind the row stays source_path=NULL forever.
+    const rows = await engine.executeRaw<{ source_path: string | null }>(
+      `SELECT source_path FROM pages WHERE source_id = 'default' AND slug = $1`,
+      [slug],
+    );
+    expect(rows[0]?.source_path).toBe(`${slug}.md`);
   });
 
   test('[REGRESSION twin] falls back to a contained file:// source_uri when source_path is null (capture --file of a vault file)', async () => {
@@ -187,6 +195,12 @@ describe('writePageThrough', () => {
 
     expect(res.written).toBe(true);
     expect(res.path).toBe(path.join(brainDir, authored));
+    // #4247: the contained file:// target is the file of record — bind it.
+    const rows = await engine.executeRaw<{ source_path: string | null }>(
+      `SELECT source_path FROM pages WHERE source_id = 'default' AND slug = $1`,
+      [slug],
+    );
+    expect(rows[0]?.source_path).toBe(authored);
     // NB: no `existsSync(slug path)` assertion here — this slug differs from the
     // authored name only by CASE, so a case-insensitive FS (macOS/Windows) folds
     // the two and existsSync would report a twin that isn't there. walkFiles
@@ -429,6 +443,58 @@ describe('writePageThrough', () => {
     expect(res.path).toBe(filePath);
     expect(fs.readFileSync(filePath, 'utf8')).not.toBe('stale\n');
     expect(fs.existsSync(path.join(sourceRoot, sourcePath))).toBe(false);
+  });
+
+  test('[#4247] put-born page in a subdirectory-scoped local_path binds a Git-root-relative source_path', async () => {
+    const gitRoot = path.join(tmpRoot, 'monorepo');
+    fs.mkdirSync(path.join(gitRoot, '.git'), { recursive: true });
+    const sourceRoot = path.join(gitRoot, 'public', 'changelog');
+    fs.mkdirSync(sourceRoot, { recursive: true });
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, local_path, config) VALUES ('changelog', 'Changelog', $1, '{}'::jsonb)`,
+      [sourceRoot],
+    );
+    const slug = 'posts/2026-08-24';
+    // Born via put: no file of record, so the slug-derived path is minted
+    // under the source's own tree.
+    await importFromContent(engine, slug, `---\ntitle: Release\ntype: note\n---\n\n# Body\n`, {
+      noEmbed: true,
+      sourceId: 'changelog',
+    });
+
+    const res = await writePageThrough(engine, slug, { sourceId: 'changelog' });
+
+    expect(res.written).toBe(true);
+    expect(res.path).toBe(path.join(sourceRoot, 'posts', '2026-08-24.md'));
+    // Scoped syncs record source_path GIT-ROOT-relative (#774), and
+    // delete-reconcile keys on that exact form — a local_path-relative bind
+    // here would desync reconcile and sweep the page while its file exists.
+    const rows = await engine.executeRaw<{ source_path: string | null }>(
+      `SELECT source_path FROM pages WHERE source_id = 'changelog' AND slug = $1`,
+      [slug],
+    );
+    expect(rows[0]?.source_path).toBe(`public/changelog/${slug}.md`);
+  });
+
+  test('[#4247] an existing scanner-recorded source_path is never rewritten by write-through', async () => {
+    await engine.setConfig('sync.repo_path', brainDir);
+    const slug = 'library/people/steve-jobs';
+    const authored = 'Library/People/Steve Jobs.md';
+    await importFromContent(engine, slug, `---\ntitle: Steve Jobs\ntype: person\n---\n\n# Body\n`, {
+      noEmbed: true,
+      sourceId: 'default',
+      sourcePath: authored,
+    });
+    fs.mkdirSync(path.join(brainDir, 'Library', 'People'), { recursive: true });
+
+    const res = await writePageThrough(engine, slug, { sourceId: 'default' });
+
+    expect(res.written).toBe(true);
+    const rows = await engine.executeRaw<{ source_path: string | null }>(
+      `SELECT source_path FROM pages WHERE source_id = 'default' AND slug = $1`,
+      [slug],
+    );
+    expect(rows[0]?.source_path).toBe(authored);
   });
 
   test('[REGRESSION #2831] differently-cased entry occupying the target → skipped case_insensitive_collision, existing file untouched', async () => {
