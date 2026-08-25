@@ -161,6 +161,9 @@ export const E2E_TEST_MAP: Record<string, string[]> = {
     "test/e2e/migrate-chain.test.ts",
     "test/e2e/migration-flow.test.ts",
   ],
+  // Autopilot linux install/uninstall lifecycle (PATH-shimmed crontab +
+  // systemctl; the ubuntu CI runner's only behavioral pin on those arms).
+  "src/commands/autopilot.ts": ["test/e2e/autopilot-linux-lifecycle.serial.test.ts"],
   "src/commands/doctor.ts": ["test/e2e/doctor-progress.test.ts"],
   // Doctor check modules peeled from doctor.ts feed the same e2e surface.
   "src/commands/doctor/**": ["test/e2e/doctor-progress.test.ts"],
