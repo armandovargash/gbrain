@@ -59,6 +59,9 @@ export const E2E_TEST_MAP: Record<string, string[]> = {
   // Takes write-op layer (fence-first write + page-lock journey on real PG).
   "src/core/ops/takes.ts": ["test/e2e/takes-write-ops-postgres.test.ts"],
   "src/core/takes-write.ts": ["test/e2e/takes-write-ops-postgres.test.ts"],
+  // JSONB bind parity for the cycle writers (the #2339 class PGLite hides).
+  "src/core/cycle/propose-takes.ts": ["test/e2e/propose-takes-jsonb-postgres.test.ts"],
+  "src/core/cycle/calibration-profile.ts": ["test/e2e/calibration-profile-write.test.ts"],
   "src/core/cycle/patterns.ts": ["test/e2e/multi-source-bug-class.test.ts"],
   "src/core/cycle/synthesize.ts": [
     "test/e2e/multi-source-bug-class.test.ts",
