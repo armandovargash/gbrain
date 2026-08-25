@@ -74,6 +74,7 @@ export class SchemaPackMutationError extends Error {
   readonly code:
     | 'PACK_NOT_FOUND'
     | 'PACK_READONLY'
+    | 'INVALID_PACK_NAME'
     | 'PACK_CORRUPT'
     | 'TYPE_EXISTS'
     | 'TYPE_NOT_FOUND'
@@ -130,6 +131,19 @@ export interface MutateOpts extends PackLockOpts {
  * the installed module and edits would be lost on upgrade.
  */
 export function locateMutablePackFile(name: string): { path: string; format: PackFileFormat } {
+  // SECURITY: `name` is joined into filesystem paths (baseDir + pack file).
+  // A traversal-shaped name (`../`, absolute, separators, NUL) would escape
+  // $GBRAIN_HOME/schema-packs/ — and this op is reachable over remote MCP
+  // (admin scope, NOT localOnly). Kebab-only keeps every derived path
+  // contained by construction. The message never echoes a resolved path
+  // (existence-oracle discipline).
+  if (name.length === 0 || name.length > 128 || !/^[a-z0-9][a-z0-9-]*$/.test(name)) {
+    throw new SchemaPackMutationError(
+      'INVALID_PACK_NAME',
+      `pack name must be kebab-case (matching ^[a-z0-9][a-z0-9-]*$, max 128 chars); got ${JSON.stringify(name.slice(0, 64))}`,
+      { pack: name.slice(0, 64) },
+    );
+  }
   if (BUNDLED_PACK_NAMES.has(name)) {
     throw new SchemaPackMutationError(
       'PACK_READONLY',
