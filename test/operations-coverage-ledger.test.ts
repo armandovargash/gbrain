@@ -84,6 +84,7 @@ const LEDGER: Record<string, string> = {
   get_job: 'test/jobs-ops-token-redaction.test.ts',
   list_jobs: 'test/jobs-ops-token-redaction.test.ts',
   cancel_job: 'test/jobs-ops-token-redaction.test.ts',
+  send_job_message: 'test/jobs-sidechannel-fence.test.ts',
   retry_job: 'test/jobs-ops-token-redaction.test.ts',
   submit_agent: 'test/submit-agent.test.ts',
   get_agent_job: 'test/get-agent-job.test.ts',
@@ -110,6 +111,9 @@ const LEDGER: Record<string, string> = {
   get_recent_transcripts: 'test/v0_29-tool-surfaces.test.ts',
   chronicle_day: 'test/chronicle-delight.test.ts',
   chronicle_on_this_day: 'test/chronicle-delight.test.ts',
+  chronicle_since: 'test/operations-source-isolation-matrix.test.ts',
+  chronicle_last_seen: 'test/operations-source-isolation-matrix.test.ts',
+  volunteer_chronicle: 'test/operations-source-isolation-matrix.test.ts',
   ontology_get: 'test/chronicle-ontology-ops.test.ts',
   ontology_propose: 'test/facts-visibility.test.ts',
   ontology_dimensions: 'test/chronicle-ontology-ops.test.ts',
@@ -160,10 +164,6 @@ const UNCOVERED: string[] = [
   'pause_job',
   'resume_job',
   'replay_job',
-  'send_job_message',
-  'chronicle_since',
-  'chronicle_last_seen',
-  'volunteer_chronicle',
 ];
 
 /** The seeded literal length of UNCOVERED. NEVER raise this number. */
