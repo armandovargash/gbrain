@@ -193,6 +193,7 @@ export const E2E_TEST_MAP: Record<string, string[]> = {
     "test/e2e/upgrade.test.ts",
     "test/e2e/migrate-chain.test.ts",
     "test/e2e/migration-flow.test.ts",
+    "test/e2e/upgrade-bun-link-arc.serial.test.ts",
   ],
   // Autopilot linux install/uninstall lifecycle (PATH-shimmed crontab +
   // systemctl; the ubuntu CI runner's only behavioral pin on those arms).
