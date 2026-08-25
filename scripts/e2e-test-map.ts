@@ -142,6 +142,24 @@ export const E2E_TEST_MAP: Record<string, string[]> = {
   // pinned, documented gap — any change here must re-run the pin. (Matches
   // src/core/pglite-engine/** too; selector unions the entries.)
   "src/core/pglite-engine/cjk-search.ts": ["test/e2e/engine-parity-cjk.test.ts"],
+  // D7 parity batch: the code-edge read paths (getCallersOf / getCalleesOf /
+  // getEdgesByChunk) live in the peeled engine modules; both modules key the
+  // cross-engine read-parity suite directly. (The engine-dir ** globs above
+  // match these files too; the selector unions the entries.)
+  "src/core/postgres-engine/code-edges.ts": ["test/e2e/code-edges-read-parity.test.ts"],
+  "src/core/pglite-engine/code-edges.ts": ["test/e2e/code-edges-read-parity.test.ts"],
+  // D7 parity batch: chronicle ontology merge (mergeOntologyFact helpers in
+  // chronicle/ontology.ts) + event projection (only production caller:
+  // chronicle/extract-events.ts) and their op surface run against BOTH
+  // engines; a change to any of them re-runs the parity pins.
+  "src/core/chronicle/**": [
+    "test/e2e/ontology-merge-parity.test.ts",
+    "test/e2e/chronicle-event-projection-parity.test.ts",
+  ],
+  "src/core/ops/chronicle.ts": [
+    "test/e2e/ontology-merge-parity.test.ts",
+    "test/e2e/chronicle-event-projection-parity.test.ts",
+  ],
   // Schema source of truth: any change must pass the cross-engine drift gate.
   "src/schema.sql": ["test/e2e/schema-drift.test.ts"],
   "src/core/pglite-schema.ts": ["test/e2e/schema-drift.test.ts"],
@@ -168,7 +186,9 @@ export const E2E_TEST_MAP: Record<string, string[]> = {
   // test/mounts-cli.test.ts; this e2e pins the resolver→engine wiring.
   "src/core/brain-resolver.ts": ["test/e2e/mounts-routing-pglite.test.ts"],
   "src/commands/mounts.ts": ["test/e2e/mounts-routing-pglite.test.ts"],
-  // Upgrade chains migration ledger; touches both runners.
+  // Upgrade chains migration ledger; touches both runners. The bun-link arc
+  // (detection marker, pull→install ordering, post-upgrade ledger checkpoint,
+  // --swap-only) is behaviorally pinned by the shimmed serial e2e (G6).
   "src/commands/upgrade.ts": [
     "test/e2e/upgrade.test.ts",
     "test/e2e/migrate-chain.test.ts",
