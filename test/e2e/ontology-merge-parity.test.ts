@@ -146,12 +146,11 @@ describeBoth('Engine parity — mergeOntologyFact matrix (D7)', () => {
       expect(r.sup.action).toBe('superseded_prior');
       expect(typeof r.sup.factId).toBe('number');
       // The superseded row is the ORIGINAL open row, not the corroboration
-      // echo (which was born expired). Reality wart (documented, not pinned):
-      // the Postgres engine passes `current.id` through un-normalized, so at
-      // runtime supersededId is a BigInt there while factId is Number()'d and
-      // PGLite returns plain numbers — compare value-normalized.
-      expect(r.sup.supersededId).not.toBeNull();
-      expect(Number(r.sup.supersededId)).toBe(r.first.factId!);
+      // echo (which was born expired). The runtime type is pinned: the
+      // Postgres engine once passed `current.id` through un-Number()'d,
+      // returning a BigInt where the contract says number | null.
+      expect(typeof r.sup.supersededId).toBe('number');
+      expect(r.sup.supersededId).toBe(r.first.factId!);
     }
 
     // Row-level parity: identical normalized facts tables.

@@ -4601,7 +4601,7 @@ export class PostgresEngine implements BrainEngine {
         // Close the prior row's valid window at the new fact's valid_from (or now()).
         await sql`UPDATE facts SET valid_until = COALESCE(${validFrom}::timestamptz, now()), superseded_by = ${newId}
                    WHERE id = ${current.id} AND valid_until IS NULL`;
-        supersededId = current.id;
+        supersededId = Number(current.id);
       }
     }
     return { action: supersededId ? 'superseded_prior' : 'inserted', factId: newId, supersededId };
