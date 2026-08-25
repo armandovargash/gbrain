@@ -83,7 +83,10 @@ export const E2E_TEST_MAP: Record<string, string[]> = {
   "src/core/embedding-migration.ts": ["test/e2e/migrate-embeddings-postgres.test.ts"],
   "src/core/retrieval-upgrade-planner.ts": ["test/e2e/migrate-embeddings-postgres.test.ts"],
   "src/commands/extract.ts": ["test/e2e/multi-source-bug-class.test.ts"],
-  "src/commands/migrate-engine.ts": ["test/e2e/multi-source-bug-class.test.ts"],
+  "src/commands/migrate-engine.ts": [
+    "test/e2e/multi-source-bug-class.test.ts",
+    "test/e2e/migrate-engine-pglite-to-postgres.test.ts",
+  ],
   // Any minions queue/worker/handler change exercises all minion E2E.
   "src/core/minions/**": [
     "test/e2e/minions-concurrency.test.ts",
