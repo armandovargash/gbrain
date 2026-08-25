@@ -69,9 +69,31 @@ describe('corpus integrity', () => {
     for (const required of ['Alice Example', 'Widget Co', 'fund-c']) {
       expect(text).toContain(required);
     }
-    // The repo's privacy tripwires (never real contacts/agents).
-    for (const banned of ['Wintermute', 'diana-hu']) {
-      expect(text.includes(banned)).toBe(false);
+    // Negative side: the corpus lives under evals/, OUTSIDE the scan surface
+    // of the repo privacy guards (check-privacy.sh scans src/test/docs/skills/
+    // scripts only), so this test re-applies their banned tokens to the
+    // corpus. The tokens are read from the guard scripts — their one
+    // allowlisted home — because repeating the literals here would itself
+    // trip check-privacy / check-test-real-names on this file.
+    const lower = text.toLowerCase();
+    const realNamesSh = readFileSync(join(repoRoot, 'scripts/check-test-real-names.sh'), 'utf8');
+    // Line-state parse (a lazy paren regex truncates at ')' inside comments);
+    // entries only, not quoted words in comments.
+    const banned: string[] = [];
+    let inArray = false;
+    for (const line of realNamesSh.split('\n')) {
+      if (/^BANNED_(NAMES|EMAILS)=\($/.test(line.trim())) { inArray = true; continue; }
+      if (inArray && line.trim() === ')') { inArray = false; continue; }
+      const m = inArray ? line.match(/^\s*'([^']+)'/) : null;
+      if (m) banned.push(m[1]);
+    }
+    const privacySh = readFileSync(join(repoRoot, 'scripts/check-privacy.sh'), 'utf8');
+    const forkName = privacySh.match(/^BANNED_NAME='([^']+)'/m)?.[1];
+    expect(forkName).toBeTruthy();
+    banned.push(forkName!);
+    expect(banned.length).toBeGreaterThanOrEqual(5);
+    for (const b of banned) {
+      expect(lower.includes(b.toLowerCase())).toBe(false);
     }
   });
 });
