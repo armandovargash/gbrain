@@ -28,7 +28,10 @@ function mkCtx(): OperationContext {
     logger: { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} } as unknown as OperationContext['logger'],
     dryRun: false,
     remote: false,
-  };
+    // Unset source scope: sourceScopeOpts treats a falsy ctx.sourceId as
+    // "no scalar scope", which is exactly the trusted brain-wide shape.
+    sourceId: undefined as unknown as string,
+  } as OperationContext;
 }
 
 let engine: PGLiteEngine;
