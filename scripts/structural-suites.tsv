@@ -193,6 +193,7 @@ test/resolver.test.ts	RESOLVER.md trigger round-trip (D5/C)	2	readFileSync
 test/resolver.test.ts	Skill example-name validator (D13)	4	readFileSync
 test/schema-cli-contract.test.ts	v0.39 T6 — schema CLI contract	7	readFileSync
 test/schema-pack-unify-types-handler.test.ts	#1575 unify-types worker dry-run default	1	readFileSync
+test/schema-pack/suggest.test.ts	runSuggest — source-text contract (structural)	1	readFileSync
 test/scripts/classify-tests.test.ts	classify-tests detectors	18	bun-file,doctor-source-helper,exec-scan,readFileSync
 test/scripts/coverage-diff-gate.test.ts	exemptions	3	readFileSync
 test/scripts/e2e-wiring.test.ts	e2e file claim ratchet	2	readFileSync
