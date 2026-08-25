@@ -189,6 +189,10 @@ export const E2E_TEST_MAP: Record<string, string[]> = {
   "src/commands/serve-http.ts": [
     "test/e2e/serve-http-ingest-webhook.test.ts",
     "test/e2e/serve-http-oauth.test.ts",
+    // #3242 wiring: legacy no-grant federated widening vs granted confinement
+    // over the SDK /mcp transport (verifyAccessToken → noGrantFederatedScope
+    // → OperationContext.localFederatedSourceIds).
+    "test/e2e/serve-http-source-grant.test.ts",
   ],
   "src/core/ingestion/**": [
     "test/e2e/ingestion-roundtrip.test.ts",
