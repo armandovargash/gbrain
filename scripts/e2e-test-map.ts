@@ -132,6 +132,11 @@ export const E2E_TEST_MAP: Record<string, string[]> = {
     "test/e2e/engine-parity.test.ts",
     "test/e2e/schema-drift.test.ts",
   ],
+  // The CJK keyword branch exists ONLY in the PGLite engine (ILIKE +
+  // term-frequency); Postgres has none. The cross-engine asymmetry is a
+  // pinned, documented gap — any change here must re-run the pin. (Matches
+  // src/core/pglite-engine/** too; selector unions the entries.)
+  "src/core/pglite-engine/cjk-search.ts": ["test/e2e/engine-parity-cjk.test.ts"],
   // Schema source of truth: any change must pass the cross-engine drift gate.
   "src/schema.sql": ["test/e2e/schema-drift.test.ts"],
   "src/core/pglite-schema.ts": ["test/e2e/schema-drift.test.ts"],
