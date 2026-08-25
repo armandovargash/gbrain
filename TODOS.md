@@ -7789,3 +7789,41 @@ covers DEAD logs; go-forward capture beyond Claude Code is deliberately absent.
   High blast radius: touches every read op; do NOT attempt until both
   sweeps (read-side, landed; write-side, P2 above) are in place as safety
   nets. Effort: L. Depends on: the P2 write-side sweep.
+
+## Wave-K follow-ups (filed from v0.46.30.0 wave-k)
+
+- [ ] **P3 — Wave-orchestration tooling: `scripts/wave-manifest.ts`.**
+  **What:** a script that owns the fix-wave snapshot → manifest → absorb
+  pipeline (enumerate approved fix branches, emit the ordered pick manifest
+  with shas/files/kind, verify each pick's reachability, and record
+  absorb/defer outcomes). **Why:** every wave re-derives this by hand —
+  pass coordination facts, tsv-ownership rows, and pick order live in ad-hoc
+  JSON + prompts, and a transcription slip silently reorders or drops a fix.
+  **Context:** follow-up from v0.46.30.0 wave-k; see
+  `.context/wave-k/trainB-assembly.json` for the shape a generator should
+  emit. **Effort:** M.
+
+- [ ] **P3 — GitHub label-system consolidation.** **What:** collapse the old
+  `p0/p1/p2` + `verified-real` label family into the newer `triage:*` scheme
+  (one migration pass over open issues, then delete the legacy labels).
+  **Why:** wave triage currently matches BOTH families, so a query against
+  one family undercounts and severity sorts disagree between tools.
+  **Context:** follow-up from v0.46.30.0 wave-k. **Effort:** S.
+
+- [ ] **P2 — PR-triggered full-e2e opt-in label for wave-scale PRs.**
+  **What:** a `ci:full-e2e` (name TBD) PR label that runs the full 202-file
+  e2e matrix on the PR head instead of waiting for nightly. **Why:** wave
+  trains land tens of picks per PR; today the full matrix is nightly-only, so
+  a train-wide e2e regression surfaces a day after merge instead of on the
+  PR. **Context:** follow-up from v0.46.30.0 wave-k; blocked on
+  workflow-scope push credentials (the workflow file change can't ship from
+  a fix branch without them). **Effort:** M.
+
+- [ ] **P3 — #4364 verify note: `--list` DB probe misclassifies an empty
+  brain.** **What:** `apply-migrations --list`'s probe labels a
+  reachable-but-uninitialized DB "UNREACHABLE (relation config does not
+  exist)". Classify post-connect query errors (undefined table/relation) as
+  connected-uninitialized instead of unreachable. **Why:** the current label
+  sends operators debugging connectivity when the fix is `gbrain init`.
+  **Context:** follow-up from v0.46.30.0 wave-k, filed by #4364's verifier;
+  `src/commands/apply-migrations.ts` probe branch. **Effort:** S.
