@@ -110,12 +110,15 @@ export const E2E_TEST_MAP: Record<string, string[]> = {
     "test/e2e/schema-drift.test.ts",
     // #3391: includeNullSignature stale predicates (engine parity).
     "test/e2e/migrate-embeddings-postgres.test.ts",
+    // getHealth islanded-liveness + entity-coverage floor (#4153/#4147).
+    "test/e2e/health-parity-postgres.test.ts",
   ],
   // PGLite bootstrap path + parity guard.
   "src/core/pglite-engine.ts": [
     "test/e2e/postgres-bootstrap.test.ts",
     "test/e2e/engine-parity.test.ts",
     "test/e2e/schema-drift.test.ts",
+    "test/e2e/health-parity-postgres.test.ts",
   ],
   // Engine method modules peeled from the façades carry the same blast
   // radius as the façades themselves.
@@ -126,11 +129,13 @@ export const E2E_TEST_MAP: Record<string, string[]> = {
     "test/e2e/engine-parity.test.ts",
     "test/e2e/schema-drift.test.ts",
     "test/e2e/migrate-embeddings-postgres.test.ts",
+    "test/e2e/health-parity-postgres.test.ts",
   ],
   "src/core/pglite-engine/**": [
     "test/e2e/postgres-bootstrap.test.ts",
     "test/e2e/engine-parity.test.ts",
     "test/e2e/schema-drift.test.ts",
+    "test/e2e/health-parity-postgres.test.ts",
   ],
   // The CJK keyword branch exists ONLY in the PGLite engine (ILIKE +
   // term-frequency); Postgres has none. The cross-engine asymmetry is a
