@@ -591,8 +591,10 @@ const pause_job: Operation = {
   params: {
     id: { type: 'number', required: true, description: 'Job ID' },
   },
+  mutating: true,
   scope: 'admin',
   handler: async (ctx, p) => {
+    if (ctx.dryRun) return { dry_run: true, action: 'pause_job', id: p.id };
     const { MinionQueue } = await import('../minions/queue.ts');
     const queue = new MinionQueue(ctx.engine);
     const job = await queue.pauseJob(p.id as number);
@@ -607,8 +609,10 @@ const resume_job: Operation = {
   params: {
     id: { type: 'number', required: true, description: 'Job ID' },
   },
+  mutating: true,
   scope: 'admin',
   handler: async (ctx, p) => {
+    if (ctx.dryRun) return { dry_run: true, action: 'resume_job', id: p.id };
     const { MinionQueue } = await import('../minions/queue.ts');
     const queue = new MinionQueue(ctx.engine);
     const job = await queue.resumeJob(p.id as number);
