@@ -53,6 +53,12 @@ export const E2E_TEST_MAP: Record<string, string[]> = {
   "src/core/cycle.ts": ["test/e2e/cycle.test.ts", "test/e2e/dream.test.ts"],
   // Multi-source sync writes share the per-source bookmark anchor.
   "src/core/sync.ts": ["test/e2e/sync.test.ts", "test/e2e/multi-source.test.ts"],
+  // F7: real SIGKILL mid-sync on live Postgres — checkpoint banking
+  // (op_checkpoint_paths), the frozen last_commit bookmark, stranded-lock
+  // reclaim via TTL + steal grace, and exactly-once convergence on resume.
+  // The peeled sync-* core modules (anchor/lock/reconcile/delta/git/…) all
+  // feed that kill/resume journey.
+  "src/core/sync-*.ts": ["test/e2e/sync-sigkill-resume-postgres.test.ts"],
   // v0.32.8 multi-source bug class regression suite — fires on any cycle
   // phase, extract, integrity, embed, or migrate-engine change.
   "src/core/cycle/extract-takes.ts": ["test/e2e/multi-source-bug-class.test.ts"],
