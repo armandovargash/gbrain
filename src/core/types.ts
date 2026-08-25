@@ -431,6 +431,10 @@ export interface DomainBankRow {
 }
 
 export interface SalienceOpts {
+  /** Scalar source scope. Ignored when `sourceIds` is set (array wins). */
+  sourceId?: string;
+  /** Federated source scope — the op layer passes `ctx.auth.allowedSources`. */
+  sourceIds?: string[];
   /** Window in days. Default 14. */
   days?: number;
   /** Max rows to return (clamped at 100). Default 20. */
@@ -531,6 +535,10 @@ export const ENRICH_ORDER_SQL: Record<EnrichCandidatesOpts['order'], string> = {
  * current count exceeds `mean + sigma * stddev`. Year cohort deferred to v0.30.
  */
 export interface AnomaliesOpts {
+  /** Scalar source scope. Ignored when `sourceIds` is set (array wins). */
+  sourceId?: string;
+  /** Federated source scope — the op layer passes `ctx.auth.allowedSources`. */
+  sourceIds?: string[];
   /** ISO date (YYYY-MM-DD). Default = today (UTC). */
   since?: string;
   /** Days of history for the baseline. Default 30. */

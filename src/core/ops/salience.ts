@@ -9,6 +9,7 @@
  */
 
 import type { Operation } from './contract.ts';
+import { sourceScopeOpts } from './context.ts';
 import {
   GET_RECENT_SALIENCE_DESCRIPTION,
   FIND_ANOMALIES_DESCRIPTION,
@@ -45,6 +46,7 @@ const get_recent_salience: Operation = {
   handler: async (ctx, p) => {
     const recencyBias = p.recency_bias === 'on' ? 'on' : 'flat';
     return ctx.engine.getRecentSalience({
+      ...sourceScopeOpts(ctx),
       days: typeof p.days === 'number' ? p.days : undefined,
       limit: typeof p.limit === 'number' ? p.limit : undefined,
       slugPrefix: typeof p.slugPrefix === 'string' ? p.slugPrefix : undefined,
@@ -76,6 +78,7 @@ const find_anomalies: Operation = {
   },
   handler: async (ctx, p) => {
     return ctx.engine.findAnomalies({
+      ...sourceScopeOpts(ctx),
       since: typeof p.since === 'string' ? p.since : undefined,
       lookback_days: typeof p.lookback_days === 'number' ? p.lookback_days : undefined,
       sigma: typeof p.sigma === 'number' ? p.sigma : undefined,

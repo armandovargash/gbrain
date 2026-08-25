@@ -215,7 +215,29 @@ const find_contradictions: Operation = {
         resolution_command: string;
       }>;
     }> | undefined) ?? [];
-    const findings = perQuery.flatMap((q) => q.contradictions);
+    const allFindings = perQuery.flatMap((q) => q.contradictions);
+    // Source isolation (fail-closed): the probe report is brain-wide, so a
+    // scoped caller sees a finding only when BOTH endpoints resolve inside
+    // their source scope. Existence is checked with a SCOPED getPage (per-slug
+    // cache; findings are bounded by the report size). An unscoped trusted
+    // local caller ({} scope) keeps the brain-wide view.
+    const scope = sourceScopeOpts(ctx);
+    let findings = allFindings;
+    if (scope.sourceId !== undefined || scope.sourceIds !== undefined) {
+      const cache = new Map<string, boolean>();
+      const inScope = async (slug: string): Promise<boolean> => {
+        const hit = cache.get(slug);
+        if (hit !== undefined) return hit;
+        const ok = (await ctx.engine.getPage(slug, scope)) !== null;
+        cache.set(slug, ok);
+        return ok;
+      };
+      const kept: typeof allFindings = [];
+      for (const f of allFindings) {
+        if ((await inScope(f.a.slug)) && (await inScope(f.b.slug))) kept.push(f);
+      }
+      findings = kept;
+    }
     const filtered = findings.filter((f) => {
       if (sevFilter && f.severity !== sevFilter) return false;
       if (slugFilter) {
