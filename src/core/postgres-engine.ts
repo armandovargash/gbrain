@@ -4417,13 +4417,13 @@ export class PostgresEngine implements BrainEngine {
   // JOIN event page; hide soft-deleted event projections (read-time, not just
   // doctor); order by COALESCE(event effective_date, date) for intra-day
   // sequence. Source scope: federated sourceIds[] > scalar sourceId > unscoped.
-  private chronicleSourceCond(opts?: { sourceId?: string; sourceIds?: string[] }) {
+  // ep=true: the ep LEFT JOIN carries the same scope so out-of-scope event fields null out (#2200 origin-join shape).
+  private chronicleSourceCond(opts?: { sourceId?: string; sourceIds?: string[] }, ep = false) {
     const sql = this.sql;
-    return opts?.sourceIds && opts.sourceIds.length > 0
-      ? sql`AND p.source_id = ANY(${opts.sourceIds}::text[])`
-      : opts?.sourceId
-        ? sql`AND p.source_id = ${opts.sourceId}`
-        : sql``;
+    if (opts?.sourceIds && opts.sourceIds.length > 0)
+      return ep ? sql`AND ep.source_id = ANY(${opts.sourceIds}::text[])` : sql`AND p.source_id = ANY(${opts.sourceIds}::text[])`;
+    if (opts?.sourceId) return ep ? sql`AND ep.source_id = ${opts.sourceId}` : sql`AND p.source_id = ${opts.sourceId}`;
+    return sql``;
   }
 
   async getTimelineForDate(date: string, opts?: ChronicleTimelineOpts): Promise<ChronicleTimelineRow[]> {
@@ -4440,7 +4440,7 @@ export class PostgresEngine implements BrainEngine {
              ep.frontmatter->'event'->>'kind' AS kind
       FROM timeline_entries te
       JOIN pages p ON p.id = te.page_id AND p.deleted_at IS NULL
-      LEFT JOIN pages ep ON ep.id = te.event_page_id
+      LEFT JOIN pages ep ON ep.id = te.event_page_id ${this.chronicleSourceCond(opts, true)}
       WHERE te.date >= ${lower} AND te.date <= ${upper}
         AND (te.event_page_id IS NULL OR ep.deleted_at IS NULL)
         ${this.chronicleSourceCond(opts)}
@@ -4461,7 +4461,7 @@ export class PostgresEngine implements BrainEngine {
              ep.frontmatter->'event'->>'kind' AS kind
       FROM timeline_entries te
       JOIN pages p ON p.id = te.page_id AND p.deleted_at IS NULL
-      LEFT JOIN pages ep ON ep.id = te.event_page_id
+      LEFT JOIN pages ep ON ep.id = te.event_page_id ${this.chronicleSourceCond(opts, true)}
       WHERE te.date >= ${date}::date
         AND (te.event_page_id IS NULL OR ep.deleted_at IS NULL)
         ${kindCond}
@@ -4483,7 +4483,7 @@ export class PostgresEngine implements BrainEngine {
              ep.frontmatter->'event'->>'kind' AS kind
       FROM timeline_entries te
       JOIN pages p ON p.id = te.page_id AND p.deleted_at IS NULL
-      LEFT JOIN pages ep ON ep.id = te.event_page_id
+      LEFT JOIN pages ep ON ep.id = te.event_page_id ${this.chronicleSourceCond(opts, true)}
       WHERE EXTRACT(MONTH FROM te.date) = EXTRACT(MONTH FROM ${target})
         AND EXTRACT(DAY FROM te.date) = EXTRACT(DAY FROM ${target})
         AND te.date < ${target}
@@ -4507,7 +4507,7 @@ export class PostgresEngine implements BrainEngine {
       SELECT te.date::text AS last_date, ep.slug AS last_event_slug
       FROM timeline_entries te
       JOIN pages p ON p.id = te.page_id AND p.deleted_at IS NULL
-      LEFT JOIN pages ep ON ep.id = te.event_page_id
+      LEFT JOIN pages ep ON ep.id = te.event_page_id ${this.chronicleSourceCond(opts, true)}
       WHERE (te.event_page_id IS NULL OR ep.deleted_at IS NULL)
         AND te.date <= ${seenThrough}
         AND (
