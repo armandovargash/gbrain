@@ -148,6 +148,14 @@ export const E2E_TEST_MAP: Record<string, string[]> = {
   "src/core/migrate.ts": ["test/e2e/schema-drift.test.ts", "test/e2e/migrate-chain.test.ts"],
   // MCP stdio + HTTP transports share dispatch.
   "src/mcp/**": ["test/e2e/mcp.test.ts", "test/e2e/http-transport.test.ts"],
+  // G6: the --surface verbs CEILING journey over a real `serve --http` boot
+  // (hermetic PGLite): 7-verb tools/list for full-preset + bare clients,
+  // fail-closed dispatch on hidden ops, the narrow-only
+  // GBRAIN_MCP_FORCE_SURFACE kill switch, and a verb round-trip. Keyed on the
+  // surface implementation; the selector UNIONS this with the src/mcp/**
+  // entry above. src/commands/serve.ts stays deliberately unmapped
+  // (fail-closed run-all), so serve-side changes hit this suite too.
+  "src/mcp/surface.ts": ["test/e2e/serve-http-surface-ceiling.test.ts"],
   // Integrity batch-load fast path.
   "src/commands/integrity.ts": ["test/e2e/integrity-batch.test.ts"],
   // gbrain connect — raw-bearer MCP smoke probe exercised end-to-end against
