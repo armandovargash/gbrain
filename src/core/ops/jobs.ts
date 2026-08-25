@@ -543,7 +543,9 @@ const cancel_job: Operation = {
     const queue = new MinionQueue(ctx.engine);
     const cancelled = await queue.cancelJob(p.id as number);
     if (!cancelled) throw new OperationError('invalid_params', `Cannot cancel job ${p.id} (may already be in terminal status)`);
-    return cancelled;
+    // private_queue_owner_token is a capability credential (lease renewal /
+    // attach), not job data — never expose it over MCP envelopes.
+    return { ...cancelled, private_queue_owner_token: cancelled.private_queue_owner_token == null ? null : '[redacted]' };
   },
 };
 
@@ -561,7 +563,9 @@ const retry_job: Operation = {
     const queue = new MinionQueue(ctx.engine);
     const retried = await queue.retryJob(p.id as number);
     if (!retried) throw new OperationError('invalid_params', `Cannot retry job ${p.id} (must be failed or dead)`);
-    return retried;
+    // private_queue_owner_token is a capability credential (lease renewal /
+    // attach), not job data — never expose it over MCP envelopes.
+    return { ...retried, private_queue_owner_token: retried.private_queue_owner_token == null ? null : '[redacted]' };
   },
 };
 
