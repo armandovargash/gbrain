@@ -18,6 +18,7 @@ import { dispatchToolCall } from '../src/mcp/dispatch.ts';
 import { operationsByName } from '../src/core/operations.ts';
 import { MinionQueue } from '../src/core/minions/queue.ts';
 import { _resetAdmissionCacheForTest } from '../src/core/minions/admission.ts';
+import { idTakingJobsOps } from './helpers/ops-registry.ts';
 
 let engine: PGLiteEngine;
 
@@ -190,8 +191,7 @@ describe('cancel_job / retry_job — owner-token redaction (A2)', () => {
 
 describe('registry sweep ratchet — no jobs op envelope may carry the raw token', () => {
   it('every id-taking jobs op, against waiting AND failed token-bearing jobs, never leaks', async () => {
-    const { jobsOperations } = await import('../src/core/ops/jobs.ts');
-    const idOps = jobsOperations.filter(o => o.params && (o.params as Record<string, unknown>).id);
+    const idOps = idTakingJobsOps();
     // The ratchet's teeth: if a new id-taking jobs op lands, it is swept
     // automatically — an unredacted return shows up here, not in prod.
     expect(idOps.length).toBeGreaterThanOrEqual(6);
