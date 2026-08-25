@@ -149,6 +149,12 @@ export const E2E_TEST_MAP: Record<string, string[]> = {
   // a real serve --http (PGLite), so changes to either feed it.
   "src/commands/connect.ts": ["test/e2e/connect-bearer.test.ts"],
   "src/core/connect-probe.ts": ["test/e2e/connect-bearer.test.ts"],
+  // G4: brain-axis mount ROUTING journey — resolver tiers (flag > env >
+  // dotfile > path-prefix > host) exercised over real CLI spawns against two
+  // real PGLite DBs. mounts.ts subcommand dispatch itself is unit-covered in
+  // test/mounts-cli.test.ts; this e2e pins the resolver→engine wiring.
+  "src/core/brain-resolver.ts": ["test/e2e/mounts-routing-pglite.test.ts"],
+  "src/commands/mounts.ts": ["test/e2e/mounts-routing-pglite.test.ts"],
   // Upgrade chains migration ledger; touches both runners.
   "src/commands/upgrade.ts": [
     "test/e2e/upgrade.test.ts",
