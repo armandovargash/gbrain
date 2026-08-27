@@ -127,6 +127,7 @@ export async function runInit(args: string[]) {
       allowCreateDb: args.includes('--allow-create-db'),
       localPostgres: args.includes('--local-postgres'),
     });
+  }
 
   // #3753: a --force re-init with NO explicit engine choice preserves the
   // configured engine — the D5 persisted-config-wins rule extended to the

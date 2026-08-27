@@ -113,13 +113,13 @@ describe('#3943 — config get redacts sensitive values by default (--raw opts o
     expect(logs.join('\n')).not.toContain('ghp-test3943-db-secret');
   });
 
-  // Pin: redactConfigValue masks only the password of postgresql:// URLs
-  // (pre-existing behavior) — user/host/db stay legible for scripts.
-  test('database_url prints the password-masked URL', async () => {
+  // Pin: redactConfigValue routes DSNs through redactPgUrl, which drops the
+  // whole userinfo (both scheme spellings) — host/db stay legible for scripts.
+  test('database_url prints the userinfo-redacted URL', async () => {
     writeFileConfig({ engine: 'pglite', database_url: 'postgresql://user:pw3943@host/db' });
     const { logs, exit } = await runGet({}, 'database_url');
     expect(exit).toBeNull();
-    expect(logs).toContain('postgresql://user:***@host/db');
+    expect(logs).toContain('postgresql://***@host/db');
     expect(logs.join('\n')).not.toContain('pw3943');
   });
 
