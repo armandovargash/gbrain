@@ -98,6 +98,10 @@ const INTERFACE_METHODS: readonly string[] = [
   // Config + migration + raw SQL
   'getConfig', 'setConfig', 'unsetConfig', 'listConfigKeys', 'runMigration',
   'getChunksWithEmbeddings', 'executeRaw', 'executeRawDirect',
+  // v0.46.28-34 master waves (classified at the test-gap-wave merge):
+  // #3980 bulk config read, #3776 takes-embedding update, #3674 scoped
+  // link removal.
+  'getAllConfig', 'updateTakeEmbeddings', 'removeLinksByPagesAndSource',
   // Code edges
   'addCodeEdges', 'deleteCodeEdgesForChunks', 'getCallersOf', 'getCalleesOf', 'getEdgesByChunk',
   'searchKeywordChunks',
@@ -143,14 +147,14 @@ const ENGINE_INTERNAL_HELPERS: readonly string[] = [
  * per the coverage-plan D9 spec; smoked here regardless):
  *   - getPageTimestamps: @deprecated since v0.29.1 in favor of
  *     getEffectiveDates; ZERO src/ callers outside the two engines.
- *   - getTakeEmbeddings: ZERO src/ callers outside the two engines (the
- *     takes hybrid path re-scores inline; nothing rehydrates by take id).
+ *   - getTakeEmbeddings left the list at the master merge: wave-k's #3776
+ *     semantic takes retrieval gave it real callers + coverage (the ratchet
+ *     shrank, as designed — its smoke below stays as a shape pin).
  */
 const UNCALLED: readonly string[] = [
   'listPrefixSampledPages', // called by src/core/brainstorm/domain-bank.ts; brainstorm tests stub above the engine
   'listCorpusSample',       // called by src/core/brainstorm/domain-bank.ts (fallback arm)
   'getPageTimestamps',      // DELETION CANDIDATE: deprecated, zero src callers
-  'getTakeEmbeddings',      // DELETION CANDIDATE: zero src callers
   'rewriteLinks',           // documented no-op stub; callers exist (migrate.ts, cycle/phantom-redirect.ts)
 ];
 
@@ -288,16 +292,6 @@ const SMOKES: Record<string, () => Promise<void>> = {
     expect((await engine.getPageTimestamps([])).size).toBe(0);
   },
 
-  getTakeEmbeddings: async () => {
-    const embs = await engine.getTakeEmbeddings([fundATakeId, 999_999]);
-    expect(embs.size).toBe(1);
-    const vec = embs.get(fundATakeId);
-    expect(vec).toBeInstanceOf(Float32Array);
-    expect(vec!.length).toBe(DIM);
-    expect(vec![0]).toBeCloseTo(1);
-    // NULL-embedding takes and unknown ids are omitted; empty input → empty map.
-    expect((await engine.getTakeEmbeddings([])).size).toBe(0);
-  },
 
   rewriteLinks: async () => {
     // Documented no-op stub on PGLite: links key on integer page_id FKs, so
@@ -371,4 +365,17 @@ describe('uncovered-method smokes (seeded PGLite)', () => {
   for (const name of Object.keys(SMOKES)) {
     test(`smoke: ${name}`, () => SMOKES[name]());
   }
+
+  // getTakeEmbeddings left UNCALLED at the master merge (#3776 gave it real
+  // coverage elsewhere); its shape pin stays here, inside the seeded engine's
+  // lifecycle, no longer tied to the UNCALLED map.
+  test('getTakeEmbeddings shape pin (ex-UNCALLED): Float32Array rehydration + omissions', async () => {
+    const embs = await engine.getTakeEmbeddings([fundATakeId, 999_999]);
+    expect(embs.size).toBe(1);
+    const vec = embs.get(fundATakeId);
+    expect(vec).toBeInstanceOf(Float32Array);
+    expect(vec!.length).toBe(DIM);
+    expect(vec![0]).toBeCloseTo(1);
+    expect((await engine.getTakeEmbeddings([])).size).toBe(0);
+  });
 });

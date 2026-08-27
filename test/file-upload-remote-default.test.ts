@@ -59,7 +59,10 @@ afterAll(async () => {
 function ctxWithRemote(remote: boolean | undefined): OperationContext {
   return {
     engine,
-    config: {},
+    // file_upload refuses outright without a storage backend (a files row
+    // with no stored bytes) — the local backend keeps the accept-path
+    // control real while the strict rejections throw before storage.
+    config: { storage: { backend: 'local', bucket: 'test-bucket', localPath: join(outsideDir, 'storage') } },
     logger: console,
     dryRun: false,
     remote,
