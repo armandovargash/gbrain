@@ -170,9 +170,13 @@ describe('sources_* handlers — happy path', () => {
         url: 'https://github.com/example/repo',
       });
       const statusOp = findOp('sources_status');
-      const result = (await statusOp.handler(ctxRemote(['read']), {
-        id: 'mcp-status-test',
-      })) as any;
+      // This test pins the STATUS payload (clone_state/remote_url); the scope
+      // fence (out-of-scope id → not_found) has its own dedicated suite. Scope
+      // the caller to the source under test so the fence admits the read.
+      const result = (await statusOp.handler(
+        { ...ctxRemote(['read']), sourceId: 'mcp-status-test' },
+        { id: 'mcp-status-test' },
+      )) as any;
       expect(result.id).toBe('mcp-status-test');
       expect(result.clone_state).toBe('healthy');
       expect(result.remote_url).toBe('https://github.com/example/repo');
