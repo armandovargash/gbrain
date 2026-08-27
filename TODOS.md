@@ -1,5 +1,19 @@
 # TODOS
 
+## v0.46.32.0 post-release doc audit follow-ups (filed 2026-08-26)
+
+- [ ] **P2 — `gbrain import --include-hidden` is accepted but silently ignored.**
+  **What:** either parse `--include-hidden` in the import CLI and thread it into
+  `collectSyncableFiles` (which already takes `includeHidden` — the sync path uses
+  it), or drop the flag from import's registry surface. **Why:** the generated
+  flag registry lists the flag for `import`, so the CLI accepts it without effect
+  — a user waiving a dot-directory on a one-shot import gets silent exclusion,
+  the exact silent-kill class #4027 fixed for sync. **Context:** found by the
+  v0.46.32.0 cross-model doc review (follow-up from v0.46.32.0);
+  `src/commands/import.ts` never reads the flag, `src/cli.ts` passes bare args to
+  `runImport`; the library plumbing is done, only arg parsing + one test are
+  missing. **Depends on:** nothing.
+
 ## Daemon env-file lane follow-ups (#2608 / #4443 takeover, filed 2026-08-21)
 
 - [ ] **P3 — Fix the stale `config set` DB-plane claim in the install docs.**
