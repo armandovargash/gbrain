@@ -114,8 +114,12 @@ test('D5.13 (file-bytes form): the hash is the exact recipe over migrate.ts + pg
   // side (recipe or file resolution) fails HERE, not as a silent slow path.
   const expected = crypto.createHash('sha256');
   expected.update('files:v2\n');
+  // test-reads-source-ok: the hash under test is DEFINED over these files'
+  // raw bytes (coverage-immune by design) — an independent byte read is the
+  // only way to pin the recipe without reusing the implementation.
   expected.update(readFileSync('src/core/migrate.ts'));
   expected.update('\n--\n');
+  // test-reads-source-ok: same recipe pin — the hash is defined over these bytes.
   expected.update(readFileSync('src/core/pglite-schema.ts'));
   expect(computeSnapshotSchemaHash(crypto, fsModule)).toBe(expected.digest('hex'));
   // Determinism: two computations agree.
