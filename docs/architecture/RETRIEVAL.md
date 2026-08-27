@@ -168,14 +168,27 @@ reranker (cross-encoder — balanced/tokenmax; fail-open)
 alias hop (exact alias match injects/boosts the canonical page)
        │
        ▼
+exact-lookup tier (lookup-shaped queries only: slug + exact-title probes
+   promote/inject the identity page at rank-1; supersession-filtered;
+   fail-open — src/core/search/exact-lookup.ts)
+       │
+       ▼
 evidence stamp → adaptive return (opt-in) → autocut (reranked modes)
        │
        ▼
 limit slice → token-budget enforcement (per mode bundle)
        │
        ▼
-results
+results (+ retrieval-confidence grade in query-op meta — crag.ts)
 ```
+
+Per-arm fail-open has one deliberate exception: when BOTH lexical arms
+(`searchKeyword` + `searchTitles`) come back empty because of an ACCESS-class
+failure (`isDbAccessFailure` in `src/core/pg-access-classify.ts` — the DB
+itself is unreachable, not a schema gap), `hybridSearch` rethrows the arm
+error instead of returning an empty result set. A dead database must surface
+as the classified `database_error` envelope, never as a silent "no results".
+Schema-class arm failures (pre-migration brains) keep the fail-open contract.
 
 The stage order is pinned by `hybridSearch` in `src/core/search/hybrid.ts`:
 dedup runs BEFORE the reranker (so the reranker sees a diverse candidate pool,
@@ -183,6 +196,23 @@ capped by its own `topNIn`), the alias hop runs AFTER the reranker (so a query
 that is a page's declared name reliably surfaces that page regardless of how
 the reranker scored body chunks), and the token budget is enforced last, on
 the final slice.
+
+Two cross-cutting seams sit around the pipeline rather than inside it:
+
+- **Private-page visibility.** For untrusted (remote/MCP) callers, every
+  recall arm filters `visibility: private` pages via the shared predicate in
+  `src/core/search/private-visibility.ts` (fail-closed default; operator
+  opt-outs documented in `docs/operations/mcp-surface-runbook.md`). The
+  posture folds into the query-cache key, so trusted and untrusted runs never
+  share cache rows.
+- **CRAG-style confidence gate.** `src/core/search/crag.ts` grades every
+  `query` op result (`strong`/`moderate`/`weak`) from the already-stamped
+  honesty signals — zero LLM, zero added latency — and attaches the grade to
+  response meta. Config-gated and default OFF: `search.crag_escalation=true`
+  re-runs a weak retrieval once at a higher ceiling (expansion + relational +
+  wide limit, autocut off) and keeps the better-graded run;
+  `search.crag_think=true` (local callers) escalates a still-weak result to
+  `think`.
 
 ### Autocut: score-discontinuity result-sizing
 

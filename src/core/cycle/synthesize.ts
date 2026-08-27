@@ -45,6 +45,7 @@ import { writeFileSync, mkdirSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { chat as gatewayChat, validateModelId, type ChatResult } from '../ai/gateway.ts';
 import { AIConfigError } from '../ai/errors.ts';
+import { resolveChatContextTokens } from '../ai/model-resolver.ts';
 import { normalizeModelId, splitProviderModelId } from '../model-id.ts';
 import { hasAnthropicKey } from '../ai/anthropic-key.ts';
 import { basename, join, dirname, isAbsolute, resolve } from 'node:path';
@@ -66,6 +67,7 @@ export { runSubagentsInline, runDrainRenewalTick };
 import { loadAllowedSlugPrefixes } from './filing-rules.ts';
 export { loadAllowedSlugPrefixes };
 import { discoverTranscripts, DEFAULT_EXCLUDE_PATTERNS, type DiscoveredTranscript } from './transcript-discovery.ts';
+import { loadStorageConfig, isDbOnly } from '../storage-config.ts';
 import { serializeMarkdown, serializePageToMarkdown } from '../markdown.ts';
 import type { Page, PageType } from '../types.ts';
 import { validateSourceId } from '../utils.ts';
@@ -78,25 +80,6 @@ import { PAGE_SLUG_SEG } from '../cjk.ts';
 const SUMMARY_SLUG_RE = new RegExp(`^${PAGE_SLUG_SEG}(\\/${PAGE_SLUG_SEG})*$`, 'u');
 
 // ── Model context budget (D1, D5, D7, D9) ─────────────────────────────
-
-/**
- * Anthropic model id → input context window (tokens).
- * Unknown id (non-Anthropic alias, custom string) → safe 200K-token fallback
- * via `computeChunkCharBudget`. Codex finding #4: `resolveModel()` does not
- * canonicalize to Anthropic-only; this map keys on the exact strings the
- * resolver returns for known Anthropic aliases.
- */
-const MODEL_CONTEXT_TOKENS: Record<string, number> = {
-  'claude-fable-5': 1_000_000,
-  'claude-opus-5': 1_000_000,
-  'claude-sonnet-5': 1_000_000,
-  'claude-opus-4-8': 1_000_000,
-  'claude-opus-4-7': 1_000_000,
-  'claude-opus-4-6': 1_000_000,
-  'claude-sonnet-4-6': 200_000,
-  'claude-sonnet-4-5': 200_000,
-  'claude-haiku-4-5-20251001': 200_000,
-};
 
 /** Token-to-char ratio. 3.5 matches PR #748; conservative for English text. */
 export const CHARS_PER_TOKEN = 3.5;
@@ -147,8 +130,8 @@ const DEFAULT_MAX_TURNS = 16;
  *
  * Resolution:
  *   - configMaxPromptTokens (already floored at MIN_PROMPT_TOKENS) wins when set.
- *   - Else the model's MODEL_CONTEXT_TOKENS entry × HEADROOM_RATIO.
- *   - Else (non-Anthropic alias / custom id) UNKNOWN_MODEL_BUDGET_TOKENS, with
+ *   - Else the official recipe/model resolver's context declaration × HEADROOM_RATIO.
+ *   - Else (unqualified custom id / unknown provider / undeclared recipe) UNKNOWN_MODEL_BUDGET_TOKENS, with
  *     a once-per-process stderr warning.
  *
  * D7 scope: this bounds the INITIAL prompt size only. Tool-loop turn-N
@@ -162,14 +145,22 @@ export function computeChunkCharBudget(
   if (configMaxPromptTokens !== null) {
     return Math.floor(configMaxPromptTokens * CHARS_PER_TOKEN);
   }
-  // Lookup keyed on the bare model name (after prefix strip), mirroring
-  // ANTHROPIC_OUTPUT_CAPS in brainstorm/judges.ts: resolveModel returns
-  // provider-prefixed strings when TIER_DEFAULTS / config values carry a
-  // prefix (the current tier defaults all do), so a raw keyed lookup sent
-  // every tier-resolved brain to the unknown-model fallback — a 5x budget
-  // cut on 1M-context models.
-  const bare = splitProviderModelId(model).model || model;
-  const ctx = MODEL_CONTEXT_TOKENS[bare];
+  // Bare Claude ids are the one legacy shape resolveModel may still return;
+  // all other bare/custom ids remain unknown rather than guessing a provider.
+  const split = splitProviderModelId(model);
+  const qualified = split.provider
+    ? model
+    : model.startsWith('claude-')
+      ? normalizeModelId(model)
+      : null;
+  let ctx: number | undefined;
+  if (qualified) {
+    try {
+      ctx = resolveChatContextTokens(qualified);
+    } catch (err) {
+      if (!(err instanceof AIConfigError)) throw err;
+    }
+  }
   if (ctx === undefined) {
     warnUnknownModelOnce(model);
     return Math.floor(UNKNOWN_MODEL_BUDGET_TOKENS * CHARS_PER_TOKEN);
@@ -182,7 +173,7 @@ function warnUnknownModelOnce(model: string): void {
   if (_unknownModelWarned.has(model)) return;
   _unknownModelWarned.add(model);
   process.stderr.write(
-    `[dream] model "${model}" is not in MODEL_CONTEXT_TOKENS; ` +
+    `[dream] model "${model}" has no declared chat context window; ` +
     `using ${UNKNOWN_MODEL_BUDGET_TOKENS}-token fallback budget. ` +
     `Set dream.synthesize.max_prompt_tokens to override.\n`,
   );
@@ -522,7 +513,12 @@ export async function runPhaseSynthesize(
 
     // Fan-out: submit one subagent per worth-processing transcript (or one
     // per chunk for transcripts that exceed the model's per-prompt budget).
-    const allowedSlugPrefixes = await loadAllowedSlugPrefixes(config.outputRoot, engine);
+    // #4117: the validated per-lane namespaces derive extra allow-list globs
+    // so a custom reflections/originals prefix is actually writable.
+    const allowedSlugPrefixes = await loadAllowedSlugPrefixes(config.outputRoot, engine, {
+      reflectionsPrefix: config.reflectionsPrefix,
+      originalsPrefix: config.originalsPrefix,
+    });
     if (allowedSlugPrefixes.length === 0) {
       return failed(makeError('InternalError', 'NO_ALLOWLIST',
         'skills/_brain-filing-rules.json missing dream_synthesize_paths.globs'));
@@ -724,6 +720,9 @@ export async function runPhaseSynthesize(
             buildTriageMapBlock(triageVerdict, chunks[i], chunks.length),
             manifestBlock,
             allowedSlugPrefixes,
+            // #4117: validated per-lane namespaces.
+            config.reflectionsPrefix,
+            config.originalsPrefix,
           ),
           model: subagentModel,
           max_turns: config.maxTurns,
@@ -1228,6 +1227,13 @@ export interface SynthConfig {
    * grammar; invalid values fall back to 'wiki' with a stderr warning.
    */
   outputRoot: string;
+  /**
+   * #4117: per-lane namespaces (see loadDreamNamespaces). Defaults derive
+   * from outputRoot; config keys dream.synthesize.reflections_slug_prefix /
+   * dream.synthesize.originals_slug_prefix override them individually.
+   */
+  reflectionsPrefix: string;
+  originalsPrefix: string;
   subagentTimeoutMs: number;
   subagentWaitTimeoutMs: number;
   /**
@@ -1272,6 +1278,47 @@ export async function loadOutputRoot(engine: BrainEngine): Promise<string> {
     `[dream] dream.synthesize.output_root "${raw}" is not a valid slug prefix; falling back to "wiki".\n`,
   );
   return 'wiki';
+}
+
+/**
+ * #4117: per-lane output namespaces. `dream.synthesize.output_root` moves
+ * the whole tree; these two keys move the REFLECTIONS and ORIGINALS lanes
+ * individually (brains whose schema has no `personal/reflections` /
+ * `originals/ideas` convention). SUMMARY_SLUG_RE-validated with a stderr
+ * warning + default fallback — an invalid value can never leak an
+ * unvalidated prefix into the prompt or the write allow-list (fail-closed:
+ * the derived allow-list glob only ever comes from a validated prefix).
+ * Mirrors the `dream.patterns.{source,output}_slug_prefix` shape.
+ */
+export interface DreamNamespaces {
+  /** Where reflections land. Config `dream.synthesize.reflections_slug_prefix`; default `<output_root>/personal/reflections`. */
+  reflectionsPrefix: string;
+  /** Where originals land. Config `dream.synthesize.originals_slug_prefix`; default `<output_root>/originals/ideas`. */
+  originalsPrefix: string;
+}
+
+export async function loadDreamNamespaces(
+  engine: BrainEngine,
+  outputRoot: string,
+): Promise<DreamNamespaces> {
+  const resolvePrefix = async (key: string, fallback: string): Promise<string> => {
+    const raw = await engine.getConfig(key);
+    if (!raw) return fallback;
+    const trimmed = raw.trim().replace(/^\/+|\/+$/g, '');
+    if (SUMMARY_SLUG_RE.test(trimmed)) return trimmed;
+    process.stderr.write(
+      `[dream] ${key} "${raw}" is not a valid slug prefix; falling back to "${fallback}".\n`,
+    );
+    return fallback;
+  };
+  return {
+    reflectionsPrefix: await resolvePrefix(
+      'dream.synthesize.reflections_slug_prefix', `${outputRoot}/personal/reflections`,
+    ),
+    originalsPrefix: await resolvePrefix(
+      'dream.synthesize.originals_slug_prefix', `${outputRoot}/originals/ideas`,
+    ),
+  };
 }
 
 export async function loadSynthConfig(engine: BrainEngine): Promise<SynthConfig> {
@@ -1377,6 +1424,10 @@ export async function loadSynthConfig(engine: BrainEngine): Promise<SynthConfig>
     }
   }
 
+  // #4117: resolve the root once, then the per-lane namespaces from it.
+  const outputRoot = await loadOutputRoot(engine);
+  const namespaces = await loadDreamNamespaces(engine, outputRoot);
+
   return {
     enabled,
     corpusDir: corpusDir ?? null,
@@ -1397,7 +1448,9 @@ export async function loadSynthConfig(engine: BrainEngine): Promise<SynthConfig>
     cooldownHours,
     maxPromptTokens,
     maxChunksPerTranscript,
-    outputRoot: await loadOutputRoot(engine),
+    outputRoot,
+    // #4117: per-lane namespaces derived from outputRoot unless overridden.
+    ...namespaces,
     subagentTimeoutMs,
     subagentWaitTimeoutMs,
     inlineConcurrency,
@@ -2284,6 +2337,11 @@ function buildSynthesisPrompt(
   triageMapBlock = '',
   linkManifestBlock = '',
   allowedSlugPrefixes: string[] = [],
+  // #4117: per-lane namespaces. Defaults derive from outputRoot so existing
+  // callers/tests are byte-identical; loadSynthConfig passes the validated
+  // config-resolved values.
+  reflectionsPrefix = `${outputRoot}/personal/reflections`,
+  originalsPrefix = `${outputRoot}/originals/ideas`,
 ): string {
   const dateHint = t.inferredDate ?? today();
   const baseSlugSegment = sanitizeForSlug(t.basename) || `session-${dateHint}`;
@@ -2325,10 +2383,10 @@ OUTPUT POLICY (ALL of these are required)
 
 TASKS
 A. Reflections (self-knowledge, pattern recognition, emotional processing):
-   slug: \`${outputRoot}/personal/reflections/${dateHint}-<topic-slug>-${hashSuffix}\`
+   slug: \`${reflectionsPrefix}/${dateHint}-<topic-slug>-${hashSuffix}\`
 
 B. Originals (new ideas, frames, theses, mental models):
-   slug: \`${outputRoot}/originals/ideas/${dateHint}-<idea-slug>-${hashSuffix}\`
+   slug: \`${originalsPrefix}/${dateHint}-<idea-slug>-${hashSuffix}\`
 
 C. People mentions: ${linkManifestBlock ? 'check LINK CANDIDATES (and the search tool, when available) first' : 'search first, when a search tool is available'}; never write over an existing person page (the orchestrator handles people enrichment via timeline entries — your job is the reflection/original synthesis, NOT modifying existing person pages).
 
@@ -2653,7 +2711,31 @@ async function writeSummaryPage(
     frontmatter: parsed.frontmatter,
   }, { sourceId });
 
-  // Also write to disk (orchestrator dual-write).
+  // Also write to disk (orchestrator dual-write). #4506: the unconditional
+  // file write dirtied clean source repos (an untracked
+  // dream-cycle-summaries/<date>.md after every nightly run). Two
+  // suppressors, both leaving the DB row untouched:
+  //   - explicit knob `dream.synthesize.summary_file_write=false|0|off`
+  //     (default ON — back-compat for brains that expect the dual-write);
+  //   - a gbrain.yml storage tier that declares the summary slug `db_only`
+  //     (the DB/file-plane split the reporter expected to cover this path).
+  const fileWriteRaw = (await engine.getConfig('dream.synthesize.summary_file_write'))?.trim().toLowerCase();
+  const fileWriteEnabled = !(fileWriteRaw === 'false' || fileWriteRaw === '0' || fileWriteRaw === 'off');
+  let dbOnlyTier = false;
+  if (fileWriteEnabled) {
+    try {
+      const storage = loadStorageConfig(brainDir);
+      dbOnlyTier = storage !== null && isDbOnly(summarySlug, storage);
+    } catch {
+      // Unreadable gbrain.yml — keep the dual-write default (fail-open to
+      // pre-#4506 behavior; sync owns loud storage-config validation).
+    }
+  }
+  if (!fileWriteEnabled || dbOnlyTier) {
+    const why = !fileWriteEnabled ? 'dream.synthesize.summary_file_write=off' : 'db_only storage tier';
+    process.stderr.write(`[dream] summary file-write skipped (${why}): ${summarySlug} lives in the DB only\n`);
+    return;
+  }
   try {
     const filePath = join(brainDir, `${summarySlug}.md`);
     mkdirSync(dirname(filePath), { recursive: true });
@@ -2722,4 +2804,5 @@ export const __testing = {
   reverseWriteRefs,
   runSubagentsInline,
   loadSynthConfig,
+  writeSummaryPage,
 };

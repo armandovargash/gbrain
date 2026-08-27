@@ -20,7 +20,7 @@
  * AND lose to new-key config when both are set.
  */
 
-import type { BrainEngine } from './engine.ts';
+import type { ConfigReader } from './config-snapshot.ts';
 import { splitProviderModelId } from './model-id.ts';
 import type { GBrainConfig } from './config.ts';
 import { loadConfig } from './config.ts';
@@ -40,13 +40,14 @@ export interface ResolveModelOpts {
   /** Env var to consult after global default. Defaults to `GBRAIN_MODEL`. */
   envVar?: string;
   /**
-   * Tier classification (v0.31.12). Looked up after `models.default` and
-   * before the env var. Routing groups: `utility` (haiku-class, classification
-   * + expansion + verdict), `reasoning` (sonnet-class, default chat +
-   * synthesis + fact extraction), `deep` (opus-class, expensive reasoning),
-   * `subagent` (Anthropic-only multi-turn tool loop — never inherits a
-   * non-Anthropic `models.default`; falls back to TIER_DEFAULTS.subagent
-   * with a one-shot stderr warn instead).
+   * Tier classification (v0.31.12). Looked up after the per-feature config
+   * keys and BEFORE `models.default` (#3873 — tier-specific beats generic),
+   * then before the env var. Routing groups: `utility` (haiku-class,
+   * classification + expansion + verdict), `reasoning` (sonnet-class,
+   * default chat + synthesis + fact extraction), `deep` (opus-class,
+   * expensive reasoning), `subagent` (Anthropic-only multi-turn tool loop —
+   * never inherits a non-Anthropic `models.default`; falls back to
+   * TIER_DEFAULTS.subagent with a one-shot stderr warn instead).
    */
   tier?: ModelTier;
   /** Hardcoded last-resort fallback. */
@@ -304,6 +305,19 @@ export function isAnthropicProvider(modelString: string): boolean {
   return model.toLowerCase().startsWith('claude-');
 }
 
+/**
+ * OpenRouter Anthropic routes (`openrouter:anthropic/…`). These are NOT
+ * native Anthropic (`isAnthropicProvider` stays false — the Messages SDK
+ * cannot speak OR). The legacy `!useGatewayLoop && !isAnthropicProvider`
+ * pin treats them as an exception and auto-routes through gateway.toolLoop().
+ */
+export function isOpenRouterAnthropic(modelString: string): boolean {
+  if (!modelString) return false;
+  const { provider, model } = splitProviderModelId(modelString);
+  return provider?.trim().toLowerCase() === 'openrouter'
+    && model.toLowerCase().startsWith('anthropic/');
+}
+
 const _subagentTierWarningsEmitted = new Set<string>();
 
 // Module-level set of deprecated config keys we've already warned about.
@@ -346,7 +360,7 @@ export type ResolveSource =
  * unservable Anthropic default.
  */
 export async function resolveModelDetailed(
-  engine: BrainEngine | null,
+  engine: ConfigReader | null,
   opts: ResolveModelOpts,
 ): Promise<{ model: string; source: ResolveSource }> {
   const envVar = opts.envVar ?? 'GBRAIN_MODEL';
@@ -381,20 +395,23 @@ export async function resolveModelDetailed(
       }
     }
 
-    // 4. Global default
-    const def = await engine.getConfig('models.default');
-    if (def && def.trim()) {
-      const resolved = await resolveAlias(engine, def.trim());
-      return { model: enforceSubagentCapable(resolved, opts.tier, 'models.default'), source: 'models_default' };
-    }
-
-    // 5. Tier override (v0.31.12)
+    // 4. Tier override (v0.31.12; hoisted above models.default by #3873).
+    //    `models.tier.<tier>` is strictly more specific than the generic
+    //    `models.default`, so it must win — pre-fix, setting a cheap utility
+    //    tier was silently ignored on any brain that also set models.default.
     if (opts.tier) {
       const tierVal = await engine.getConfig(`models.tier.${opts.tier}`);
       if (tierVal && tierVal.trim()) {
         const resolved = await resolveAlias(engine, tierVal.trim());
         return { model: enforceSubagentCapable(resolved, opts.tier, `models.tier.${opts.tier}`), source: 'tier_config' };
       }
+    }
+
+    // 5. Global default
+    const def = await engine.getConfig('models.default');
+    if (def && def.trim()) {
+      const resolved = await resolveAlias(engine, def.trim());
+      return { model: enforceSubagentCapable(resolved, opts.tier, 'models.default'), source: 'models_default' };
     }
   }
 
@@ -422,7 +439,7 @@ export async function resolveModelDetailed(
  * `resolveModelDetailed` for the ~30 callers that don't care which step won.
  */
 export async function resolveModel(
-  engine: BrainEngine | null,
+  engine: ConfigReader | null,
   opts: ResolveModelOpts,
 ): Promise<string> {
   return (await resolveModelDetailed(engine, opts)).model;
@@ -537,7 +554,7 @@ void enforceSubagentAnthropic;
  * to `super-opus` which aliases to `opus`, we return `super-opus` and stop.
  */
 export async function resolveAlias(
-  engine: BrainEngine | null,
+  engine: ConfigReader | null,
   name: string,
   depth = 0,
 ): Promise<string> {

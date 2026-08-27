@@ -5,11 +5,17 @@ import type { BrainEngine, FileSpec } from './engine.ts';
 import { parseMarkdown } from './markdown.ts';
 import { classifyStoredType } from './schema-pack/type-usage.ts';
 import { chunkText } from './chunkers/recursive.ts';
+import { resolveMaxChunkTokens } from './embedding-input-limit.ts';
 import { chunkCodeText, chunkCodeTextFull, detectCodeLanguage, CHUNKER_VERSION } from './chunkers/code.ts';
 import { findChunkForOffset } from './chunkers/edge-extractor.ts';
 import { planEmbeddingReuse } from './embed-reuse.ts';
 import { extractCodeRefs, imageOfCandidates } from './link-extraction.ts';
-import { embedBatch, embedMultimodal, currentEmbeddingSignature } from './embedding.ts';
+import { embedMultimodal, currentEmbeddingSignature } from './embedding.ts';
+// #3374 — import-path embeds ride the shared retry loop (429 retry-after +
+// transient network backoff) instead of bare embedBatch, so one socket blip
+// mid-sync no longer aborts the whole file import. Same core→commands edge
+// precedent as embed-stale.ts.
+import { embedBatchWithBackoff } from './embed-retry.ts';
 import { slugifyPath, slugifyCodePath, isCodeFilePath, hasMalformedPathSegment } from './sync.ts';
 import type { ChunkInput, PageInput, PageType } from './types.ts';
 import { computeEffectiveDate } from './effective-date.ts';
@@ -37,12 +43,12 @@ import {
 } from './embedding-context.ts';
 import { loadSearchModeConfig, resolveSearchMode } from './search/mode.ts';
 import { normalizeAliasList } from './search/alias-normalize.ts';
-import { isUndefinedTableError, warnOncePerProcess, validateSlug } from './utils.ts';
+import { isUndefinedTableError, warnOncePerProcess, validateSlug, contentHash, contentHashLegacy } from './utils.ts';
 import { decorateEmbeddingDimError } from './embedding-dim-check.ts';
-import { computeCorpusGeneration } from './contextual-retrieval-service.ts';
+import { computeCorpusGeneration, loadSourceRow } from './contextual-retrieval-service.ts';
 import { DEFAULT_SYNOPSIS_MODEL } from './page-summary.ts';
 import { runGuardrails } from './guardrails.ts';
-import { FACTS_FENCE_BEGIN, FACTS_FENCE_END, parseFactsFence } from './facts-fence.ts';
+import { FACTS_FENCE_BEGIN, FACTS_FENCE_END, parseFactsFence, renderFactsTable, restoreHiddenFactRows, factsGapWarning } from './facts-fence.ts';
 import { scanFencedBlocks, MAX_FENCES_PER_PAGE } from './fence-scan.ts';
 
 /**
@@ -104,14 +110,6 @@ function fenceTagToPseudoPath(lang: string | undefined): string | null {
 // MAX_FENCES_PER_PAGE (fence-bomb DOS cap, GBRAIN_MAX_FENCES_PER_PAGE env
 // override) moved to fence-scan.ts with the #2862 linear scanner.
 
-function extractFactsFenceBlock(body: string): string | null {
-  const beginIdx = body.indexOf(FACTS_FENCE_BEGIN);
-  if (beginIdx === -1) return null;
-  const endIdx = body.indexOf(FACTS_FENCE_END, beginIdx + FACTS_FENCE_BEGIN.length);
-  if (endIdx === -1) return null;
-  return body.slice(beginIdx, endIdx + FACTS_FENCE_END.length);
-}
-
 function replaceOrAppendFactsFence(body: string, fenceBlock: string): string {
   const beginIdx = body.indexOf(FACTS_FENCE_BEGIN);
   if (beginIdx !== -1) {
@@ -123,6 +121,46 @@ function replaceOrAppendFactsFence(body: string, fenceBlock: string): string {
 
   const sep = body.endsWith('\n') ? '\n' : '\n\n';
   return `${body}${sep}## Facts\n\n${fenceBlock}\n`;
+}
+
+/**
+ * #2044 / #4548: row-level, visibility-aware fence merge for one page
+ * column on the remote write-back boundary. Restores non-'world' fence
+ * rows that are missing from the incoming body (a remote get_page/fetch
+ * stripped them before the caller ever saw them, so their absence is not
+ * an intentional delete). World-visible rows are never restored — the
+ * caller saw those in full, so an edit/deletion is honored as written.
+ * See restoreHiddenFactRows() in facts-fence.ts for the merge rules
+ * (stable rowNums, collision renumbering, idempotence, warnings gate).
+ *
+ * Returns the (possibly merged) body. Emits console.warn for the two
+ * surfaced conditions: a caller-authored row renumbered off a hidden
+ * rowNum, and the residual malformed-fence case where the merge could not
+ * run and hidden rows are genuinely dropped (factsGapWarning).
+ */
+function mergeHiddenFactRowsIntoBody(
+  slug: string,
+  incomingBody: string,
+  existingBody: string | null | undefined,
+): string {
+  if (!existingBody) return incomingBody;
+  const incomingFacts = parseFactsFence(incomingBody);
+  const existingFacts = parseFactsFence(existingBody);
+  const merge = restoreHiddenFactRows(incomingFacts, existingFacts);
+  if (merge) {
+    if (merge.renumbered.length > 0) {
+      console.warn(
+        `[gbrain] #2044 merge on ${slug}: ${merge.renumbered.length} incoming fact row(s) reused ` +
+        `row number(s) belonging to privacy-hidden row(s) and were renumbered ` +
+        `(${merge.renumbered.map((r) => `#${r.from}->#${r.to}`).join(', ')}); ` +
+        `the hidden row(s) keep their original numbers.`,
+      );
+    }
+    return replaceOrAppendFactsFence(incomingBody, renderFactsTable(merge.merged));
+  }
+  const gapWarning = factsGapWarning(slug, incomingFacts, existingFacts, false);
+  if (gapWarning) console.warn(gapWarning);
+  return incomingBody;
 }
 
 /**
@@ -236,7 +274,7 @@ export interface ImportResult {
   type_warning?: { kind: 'alias_of' | 'undeclared'; type: string; canonical?: string; directory?: string };
 }
 
-const MAX_FILE_SIZE = 5_000_000; // 5MB
+export const MAX_FILE_SIZE = 5_000_000; // 5MB
 
 function invalidYamlFrontmatterError(parsed: ReturnType<typeof parseMarkdown>): string | null {
   const yamlError = parsed.errors?.find((error) => error.code === 'YAML_PARSE');
@@ -597,24 +635,25 @@ export async function importFromContent(
   // unscoped-check/scoped-write bug class).
   const existing = await engine.getPage(slug, { sourceId: sourceId ?? 'default' });
 
-  // #2044: remote get_page intentionally strips private facts rows. A
-  // documented get_page -> edit -> put_page round-trip can therefore arrive
-  // with an empty/missing Facts fence even though the existing page still has
-  // canonical fence rows. Preserve the old fence in that narrow case so the
-  // system-of-record markdown is not truncated by the privacy boundary.
-  if (opts.remote === true && existing?.compiled_truth) {
-    const incomingFacts = parseFactsFence(parsed.compiled_truth);
-    const existingFacts = parseFactsFence(existing.compiled_truth);
-    const existingFenceBlock = extractFactsFenceBlock(existing.compiled_truth);
-    if (
-      incomingFacts.facts.length === 0 &&
-      incomingFacts.warnings.length === 0 &&
-      existingFacts.warnings.length === 0 &&
-      existingFacts.facts.length > 0 &&
-      existingFenceBlock
-    ) {
-      parsed.compiled_truth = replaceOrAppendFactsFence(parsed.compiled_truth, existingFenceBlock);
-    }
+  // #2044 / #4548: remote get_page/fetch intentionally strip non-'world'
+  // facts rows before an untrusted caller ever sees them. A documented
+  // get_page -> edit -> put_page round-trip therefore arrives MISSING rows
+  // the caller structurally could never have seen — their absence is not an
+  // intentional delete. Restore exactly those rows via the row-level,
+  // visibility-aware merge (restoreHiddenFactRows): world-visible rows the
+  // caller saw in full are never restored, so a legitimate edit/deletion of
+  // a visible row — including deleting a pure-world fence outright — is
+  // honored as written (#4554). Trusted local writers see everything, so
+  // the merge never fires for them.
+  // The same hazard covers the `timeline` column (#4546): a Facts fence
+  // below the `<!-- timeline -->` sentinel is a normal placement, and #4547
+  // strips its non-'world' rows for remote readers too — so a round-trip
+  // write-back arrives missing those rows as well. Each column merges
+  // against its own existing counterpart (fences don't migrate between
+  // columns here; splitBody keeps them where the caller wrote them).
+  if (opts.remote === true && existing) {
+    parsed.compiled_truth = mergeHiddenFactRowsIntoBody(slug, parsed.compiled_truth, existing.compiled_truth);
+    parsed.timeline = mergeHiddenFactRowsIntoBody(slug, parsed.timeline, existing.timeline);
   }
 
   // #1035: absence of an explicit frontmatter `type:` on an EXISTING page
@@ -642,28 +681,24 @@ export async function importFromContent(
     }
   }
 
-  const HASH_EPHEMERAL_FRONTMATTER_KEYS = [
-    'captured_at',
-    'ingested_at',
-    QUARANTINE_KEY,
-    CONTENT_FLAG_KEY,
-    EMBED_SKIP_KEY,
-  ];
-  const stableFrontmatter: Record<string, unknown> = { ...parsed.frontmatter };
-  for (const k of HASH_EPHEMERAL_FRONTMATTER_KEYS) {
-    delete stableFrontmatter[k];
-  }
-  // Hash includes all meaningful fields for idempotency.
-  const hash = createHash('sha256')
-    .update(JSON.stringify({
-      title: parsed.title,
-      type: parsed.type,
-      compiled_truth: parsed.compiled_truth,
-      timeline: parsed.timeline,
-      frontmatter: stableFrontmatter,
-      tags: parsed.tags.sort(),
-    }))
-    .digest('hex');
+  // #3694: the hash formula lives in ONE place — utils.contentHash — shared
+  // with both engines' putPage fallback, so a page written via putPage and
+  // the same page re-imported by sync produce the SAME hash (pre-fix they
+  // diverged and every putPage→sync roundtrip re-chunked + re-embedded).
+  // The helper strips HASH_EPHEMERAL_FRONTMATTER_KEYS + the tags key from a
+  // frontmatter copy and folds sorted tags in — the exact former inline
+  // formula (byte-parity pinned by test/content-hash-parity-3694.test.ts).
+  // Sort tags in place first to preserve the pre-#3694 downstream behavior
+  // (parsedPage.tags was sorted by the old inline `.sort()` mutation).
+  parsed.tags.sort();
+  const hash = contentHash({
+    title: parsed.title,
+    type: parsed.type,
+    compiled_truth: parsed.compiled_truth,
+    timeline: parsed.timeline,
+    frontmatter: parsed.frontmatter,
+    tags: parsed.tags,
+  });
 
   const parsedPage: ParsedPage = {
     type: parsed.type,
@@ -676,6 +711,31 @@ export async function importFromContent(
 
   if (existing?.content_hash === hash && !opts.forceRechunk) {
     return { slug, status: 'skipped', chunks: 0, parsedPage, ...(typeWarning ? { type_warning: typeWarning } : {}) };
+  }
+
+  // #3694 one-time reconcile: a row written by the PRE-fix putPage formula
+  // carries the legacy hash. When the parsed file matches that legacy hash,
+  // the content is unchanged — stamp the canonical hash via the narrow
+  // refreshPageBody UPDATE (no chunk churn, no re-embed, no version snapshot)
+  // and skip. The next import then hits the fast path above.
+  if (existing && !opts.forceRechunk && typeof engine.refreshPageBody === 'function') {
+    const legacyHash = contentHashLegacy({
+      title: parsed.title,
+      type: parsed.type,
+      compiled_truth: parsed.compiled_truth,
+      timeline: parsed.timeline,
+      frontmatter: parsed.frontmatter,
+    });
+    if (existing.content_hash === legacyHash) {
+      await engine.refreshPageBody(
+        slug,
+        sourceId ?? 'default',
+        parsed.compiled_truth,
+        parsed.timeline || '',
+        hash,
+      );
+      return { slug, status: 'skipped', chunks: 0, parsedPage, ...(typeWarning ? { type_warning: typeWarning } : {}) };
+    }
   }
 
   // v0.41.13 (#1309) — identity-based cross-slug dedup pre-check.
@@ -754,13 +814,18 @@ export async function importFromContent(
   // warning marker.)
   const embedSkipped = isEmbedSkipped(parsed.frontmatter) || isQuarantined(parsed.frontmatter);
   if (!embedSkipped) {
+    // #4530: cap chunk tokens at the ACTIVE embedding model's per-input
+    // limit (recipe max_input_tokens x safety; default unchanged) so strict
+    // encoders like nvidia/nv-embedqa-e5-v5 (512) never see an unembeddable
+    // chunk. Split, not truncated.
+    const chunkOpts = { maxTokens: resolveMaxChunkTokens() };
     if (parsed.compiled_truth.trim()) {
-      for (const c of chunkText(parsed.compiled_truth)) {
+      for (const c of chunkText(parsed.compiled_truth, chunkOpts)) {
         chunks.push({ chunk_index: chunks.length, chunk_text: c.text, chunk_source: 'compiled_truth' });
       }
     }
     if (parsed.timeline?.trim()) {
-      for (const c of chunkText(parsed.timeline)) {
+      for (const c of chunkText(parsed.timeline, chunkOpts)) {
         chunks.push({ chunk_index: chunks.length, chunk_text: c.text, chunk_source: 'timeline' });
       }
     }
@@ -791,15 +856,36 @@ export async function importFromContent(
   if (!opts.noEmbed) {
     const searchInput = await loadSearchModeConfig(engine);
     const knobs = resolveSearchMode(searchInput);
-    // Look up the source row for this import; default to host trust when
-    // the engine's getConfig path doesn't surface a source row (most calls).
+    // #3885: load the REAL source row so a stored `gbrain sources
+    // set-cr-mode <id> <mode>` (and the mount trust flag) applies on the
+    // inline import path — capture + reindex --markdown — not just the
+    // Minion backfill. The prior hardcoded stub (contextual_retrieval_mode:
+    // null / trust_frontmatter_overrides: false) silently ignored the
+    // per-source override. Unknown source id / pre-sources-table brains
+    // keep the stub (host-trust defaults).
+    let sourceRow: {
+      id: string;
+      contextual_retrieval_mode?: string | null;
+      trust_frontmatter_overrides?: boolean;
+    } = {
+      id: sourceId ?? 'default',
+      contextual_retrieval_mode: null,
+      trust_frontmatter_overrides: false,
+    };
+    try {
+      const row = await loadSourceRow(engine, sourceId ?? 'default');
+      sourceRow = {
+        id: row.id,
+        contextual_retrieval_mode: row.contextual_retrieval_mode ?? null,
+        trust_frontmatter_overrides: row.trust_frontmatter_overrides === true,
+      };
+    } catch {
+      // Source row missing ('default' not seeded on a fresh brain) — the
+      // stub stands, matching pre-#3885 behavior.
+    }
     const resolution = resolveContextualRetrievalMode({
       pageFrontmatter: parsed.frontmatter,
-      source: {
-        id: sourceId ?? 'default',
-        contextual_retrieval_mode: null,
-        trust_frontmatter_overrides: false,
-      },
+      source: sourceRow,
       globalMode: knobs.contextual_retrieval,
       killSwitchDisabled: knobs.contextual_retrieval_disabled,
     });
@@ -819,7 +905,7 @@ export async function importFromContent(
     const wrappedTexts = prefix
       ? chunks.map((c) => wrapChunkForEmbedding(c.chunk_text, prefix, c.chunk_source))
       : chunks.map((c) => c.chunk_text);
-    const embeddings = await embedBatch(wrappedTexts);
+    const embeddings = await embedBatchWithBackoff(wrappedTexts);
     for (let i = 0; i < chunks.length; i++) {
       chunks[i].embedding = embeddings[i];
       // token_count tracks the wrapped string length so cost reporting
@@ -1223,6 +1309,8 @@ export async function importFromFile(
   const expectedSlug = slugifyPath(relativePath);
   let resolvedSlug = expectedSlug;
   let usedFrontmatterFallback = false;
+  let fallbackReason: 'path slugified empty' | 'normalization-equivalent identity restore' =
+    'path slugified empty';
 
   if (frontmatterError) {
     return {
@@ -1254,22 +1342,36 @@ export async function importFromFile(
       };
     }
   } else if (parsed.slug !== expectedSlug) {
-    // Anti-spoof preserved: path DOES derive a slug, but the frontmatter slug
-    // claims a different one. Reject.
-    return {
-      slug: expectedSlug,
-      status: 'skipped',
-      chunks: 0,
-      error:
-        `Frontmatter slug "${parsed.slug}" does not match path-derived slug "${expectedSlug}" ` +
-        `(from ${relativePath}). Remove the frontmatter "slug:" line or move the file.`,
-    };
+    if (slugifyPath(parsed.slug) === expectedSlug) {
+      // #3772: normalization-equivalent — the frontmatter slug is a stored
+      // identity whose slugified spelling IS the path-derived slug. Export
+      // writes files at <slug>.md and stamps the original slug whenever it
+      // isn't a slugifyPath fixed point (legacy/hand-keyed slugs with case,
+      // apostrophes, accents…); accepting it here is what makes an
+      // export → import round-trip preserve page keys instead of silently
+      // re-keying. Anti-spoof holds: a slug claiming a DIFFERENT page
+      // normalizes to a different path and still rejects below.
+      resolvedSlug = parsed.slug;
+      usedFrontmatterFallback = true;
+      fallbackReason = 'normalization-equivalent identity restore';
+    } else {
+      // Anti-spoof preserved: path DOES derive a slug, but the frontmatter slug
+      // claims a different one. Reject.
+      return {
+        slug: expectedSlug,
+        status: 'skipped',
+        chunks: 0,
+        error:
+          `Frontmatter slug "${parsed.slug}" does not match path-derived slug "${expectedSlug}" ` +
+          `(from ${relativePath}). Remove the frontmatter "slug:" line or move the file.`,
+      };
+    }
   }
 
   // Emit the dual-channel audit entry AFTER we know we're not going to
   // short-circuit, so we don't log noise for failed imports.
   if (usedFrontmatterFallback) {
-    logSlugFallback(resolvedSlug, relativePath);
+    logSlugFallback(resolvedSlug, relativePath, fallbackReason);
   }
 
   // Pass the resolved slug explicitly so that any future change to
@@ -1413,7 +1515,7 @@ export async function importCodeFile(
   if (!opts.noEmbed && needsEmbedIndexes.length > 0) {
     try {
       const textsToEmbed = needsEmbedIndexes.map((i) => chunks[i]!.chunk_text);
-      const embeddings = await embedBatch(textsToEmbed);
+      const embeddings = await embedBatchWithBackoff(textsToEmbed);
       for (let j = 0; j < needsEmbedIndexes.length; j++) {
         const i = needsEmbedIndexes[j]!;
         chunks[i]!.embedding = embeddings[j]!;
@@ -1761,6 +1863,7 @@ async function readExifSafe(buf: Buffer): Promise<Record<string, unknown>> {
  * - the embedding_image_ocr config flag is off (default)
  * - the configured expansion model is unavailable (no API key)
  * - the OCR call itself fails (logged once per session)
+ * - the per-run OCR budget is exhausted (#3973 — see _ocrRunBudget below)
  *
  * Eng-1B: per-call result is reflected in counters the doctor `ocr_health`
  * check reads. Counter writes are best-effort; never fail the import.
@@ -1769,6 +1872,59 @@ async function readExifSafe(buf: Buffer): Promise<Record<string, unknown>> {
  * embedded in the image (mitigation for the OCR-as-prompt-injection vector).
  */
 let _ocrWarnedThisSession = false;
+
+// #3973: per-run OCR ceiling. A bulk import over a large image corpus with
+// OCR opted-in is an unbounded per-image LLM spend; cap it per process run.
+// Config keys (both finite by default; <= 0 disables that cap):
+//   embedding_image_ocr_max_images — max OCR calls per run (default 200)
+//   embedding_image_ocr_max_usd    — estimated-USD ceiling per run (default 1.0,
+//     estimated at OCR_EST_USD_PER_IMAGE per call — a documented constant,
+//     not a billing read; actual spend lands on the budget tracker (#4121)).
+// Over-cap: skip OCR (import continues with filename-only chunk text), warn
+// once, bump the persistent `ocr_skipped_budget` counter that doctor's
+// ocr_health check surfaces.
+const OCR_EST_USD_PER_IMAGE = 0.002;
+const OCR_MAX_IMAGES_DEFAULT = 200;
+const OCR_MAX_USD_DEFAULT = 1.0;
+const _ocrRunBudget = { images: 0, estUsd: 0, warned: false };
+
+/** Test seam: reset (and optionally preset) the per-run OCR budget state. */
+export function _resetOcrRunBudgetForTests(preset?: { images?: number; estUsd?: number }): void {
+  _ocrRunBudget.images = preset?.images ?? 0;
+  _ocrRunBudget.estUsd = preset?.estUsd ?? 0;
+  _ocrRunBudget.warned = false;
+}
+
+/** Test seam: read the per-run OCR budget state. */
+export function _getOcrRunBudgetForTests(): { images: number; estUsd: number; warned: boolean } {
+  return { ..._ocrRunBudget };
+}
+
+/** Returns a human reason when this run's OCR cap is exhausted, else null. */
+async function ocrBudgetExceeded(engine: BrainEngine): Promise<string | null> {
+  let maxImages = OCR_MAX_IMAGES_DEFAULT;
+  let maxUsd = OCR_MAX_USD_DEFAULT;
+  try {
+    const rawImages = await engine.getConfig('embedding_image_ocr_max_images');
+    if (rawImages != null && rawImages !== '') {
+      const n = Number(rawImages);
+      if (Number.isFinite(n)) maxImages = n;
+    }
+    const rawUsd = await engine.getConfig('embedding_image_ocr_max_usd');
+    if (rawUsd != null && rawUsd !== '') {
+      const n = Number(rawUsd);
+      if (Number.isFinite(n)) maxUsd = n;
+    }
+  } catch { /* config unavailable → finite defaults still apply */ }
+  if (maxImages > 0 && _ocrRunBudget.images >= maxImages) {
+    return `per-run image cap reached (${_ocrRunBudget.images}/${maxImages}; raise embedding_image_ocr_max_images to OCR more)`;
+  }
+  if (maxUsd > 0 && _ocrRunBudget.estUsd >= maxUsd) {
+    return `per-run estimated-USD cap reached (~$${_ocrRunBudget.estUsd.toFixed(3)} of $${maxUsd}; raise embedding_image_ocr_max_usd to OCR more)`;
+  }
+  return null;
+}
+
 async function maybeOcr(
   engine: BrainEngine,
   imgBuf: Buffer,
@@ -1776,6 +1932,23 @@ async function maybeOcr(
 ): Promise<string> {
   const opt = process.env.GBRAIN_EMBEDDING_IMAGE_OCR;
   if (opt !== 'true') return '';
+  return maybeOcrGated(engine, imgBuf, mime);
+}
+
+/** #3973: body of maybeOcr past the opt-in check; exported for budget tests. */
+export async function _maybeOcrGatedForTests(
+  engine: BrainEngine,
+  imgBuf: Buffer,
+  mime: string,
+): Promise<string> {
+  return maybeOcrGated(engine, imgBuf, mime);
+}
+
+async function maybeOcrGated(
+  engine: BrainEngine,
+  imgBuf: Buffer,
+  mime: string,
+): Promise<string> {
 
   // Counter helpers — quiet failure if config table is unavailable.
   async function bump(key: string) {
@@ -1784,6 +1957,20 @@ async function maybeOcr(
       await engine.setConfig(key, String((Number.isFinite(cur) ? cur : 0) + 1));
     } catch { /* non-fatal */ }
   }
+
+  // #3973: budget gate fires BEFORE the attempt counter — a budget skip is
+  // not an attempt, and the skip has its own counter for doctor ocr_health.
+  const overBudget = await ocrBudgetExceeded(engine);
+  if (overBudget) {
+    if (!_ocrRunBudget.warned) {
+      console.warn(`[gbrain] OCR skipped for the rest of this run: ${overBudget}`);
+      _ocrRunBudget.warned = true;
+    }
+    await bump('ocr_skipped_budget');
+    return '';
+  }
+  _ocrRunBudget.images += 1;
+  _ocrRunBudget.estUsd += OCR_EST_USD_PER_IMAGE;
 
   await bump('ocr_attempted');
   try {

@@ -88,6 +88,17 @@ export const ALL_EXTRACT_KINDS: readonly FactKind[] = [
   'event', 'preference', 'commitment', 'belief', 'fact',
 ] as const;
 
+export type FactNotability = 'high' | 'medium' | 'low';
+
+/**
+ * #4209 — max entity hints forwarded to the extractor prompt. Anything past
+ * this is silently dropped by the prompt builder, so the cap is NAMED here
+ * (single source of truth) and surfaced in the extract_facts op contract
+ * (param description + entity_hints_used / entity_hints_dropped response
+ * fields) instead of living as an anonymous inline slice.
+ */
+export const ENTITY_HINTS_CAP = 5;
+
 export interface ExtractInput {
   turnText: string;
   /** Opaque session id (MCP _meta.session_id, CLI --session, or null). */
@@ -110,6 +121,11 @@ export interface ExtractInput {
   abortSignal?: AbortSignal;
   /** Cap on number of facts returned per turn. Defaults to 10. */
   maxFactsPerTurn?: number;
+  /** Optional pre-embedding admission selector for extracted fact tiers. */
+  notabilityAdmission?: {
+    allowed: readonly FactNotability[];
+    invalid: 'drop';
+  };
 }
 
 /** A pre-INSERT fact ready for the engine.insertFact path. */
@@ -300,7 +316,7 @@ export async function extractFactsFromTurnWithOutcome(
   }
   const userContent = `<turn>\n${cleaned}\n</turn>\n\nExtract up to ${cap} facts.${
     input.entityHints && input.entityHints.length
-      ? ` Known entity slugs the user already mentioned: ${input.entityHints.slice(0, 5).join(', ')}.`
+      ? ` Known entity slugs the user already mentioned: ${input.entityHints.slice(0, ENTITY_HINTS_CAP).join(', ')}.`
       : ''
   }`;
   let result: ChatResult;
@@ -420,8 +436,13 @@ export async function extractFactsFromTurnWithOutcome(
       ? (candidate.kind as FactKind)
       : 'fact';
     const confidence = clampConfidence(candidate.confidence);
-    const notability = ['high', 'medium', 'low'].includes(candidate.notability || '')
-      ? (candidate.notability as 'high' | 'medium' | 'low')
+    const validTier = ['high', 'medium', 'low'].includes(candidate.notability ?? '');
+    if (input.notabilityAdmission) {
+      const tier = validTier ? candidate.notability as FactNotability : null;
+      if (!tier || !input.notabilityAdmission.allowed.includes(tier)) continue;
+    }
+    const notability: FactNotability = validTier
+      ? candidate.notability as FactNotability
       : 'medium';
 
     let embedding: Float32Array | null = null;

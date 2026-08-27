@@ -15,6 +15,7 @@ import {
   TIER_DEFAULTS,
   PROVIDER_TIER_DEFAULTS,
   isAnthropicProvider,
+  isOpenRouterAnthropic,
   _resetDeprecationWarningsForTest,
 } from '../src/core/model-config.ts';
 import type { GBrainConfig } from '../src/core/config.ts';
@@ -187,9 +188,27 @@ describe('resolveModel — 6-tier precedence', () => {
 });
 
 describe('resolveModel — v0.31.12 tier system', () => {
-  test('models.default beats tier override', async () => {
+  test('models.tier.<tier> beats models.default (#3873 — specific over generic)', async () => {
     stub.set('models.default', 'opus');
     stub.set('models.tier.reasoning', 'haiku');
+    const m = await resolveModel(stub as never, {
+      tier: 'reasoning',
+      fallback: 'sonnet',
+    });
+    expect(m).toBe(DEFAULT_ALIASES.haiku);
+  });
+
+  test('models.default still applies when the call has no tier (#3873)', async () => {
+    stub.set('models.default', 'opus');
+    stub.set('models.tier.reasoning', 'haiku');
+    const m = await resolveModel(stub as never, {
+      fallback: 'sonnet',
+    });
+    expect(m).toBe(DEFAULT_ALIASES.opus);
+  });
+
+  test('models.default still applies when the tier has no override (#3873)', async () => {
+    stub.set('models.default', 'opus');
     const m = await resolveModel(stub as never, {
       tier: 'reasoning',
       fallback: 'sonnet',
@@ -284,6 +303,17 @@ describe('resolveModel — v0.31.12 tier system', () => {
     // widen the guard).
     expect(isAnthropicProvider('openai/gpt-5')).toBe(false);
     expect(isAnthropicProvider('google/gemini-3-pro')).toBe(false);
+    // OpenRouter Anthropic is a proxy route, not the Messages API.
+    expect(isAnthropicProvider('openrouter:anthropic/claude-haiku-4.5')).toBe(false);
+  });
+
+  test('isOpenRouterAnthropic matches only openrouter:anthropic/… routes', () => {
+    expect(isOpenRouterAnthropic('openrouter:anthropic/claude-haiku-4.5')).toBe(true);
+    expect(isOpenRouterAnthropic('openrouter:anthropic/claude-sonnet-4.6')).toBe(true);
+    expect(isOpenRouterAnthropic('openrouter:openai/gpt-5.2')).toBe(false);
+    expect(isOpenRouterAnthropic('openrouter:deepseek/deepseek-chat')).toBe(false);
+    expect(isOpenRouterAnthropic('anthropic:claude-sonnet-4-6')).toBe(false);
+    expect(isOpenRouterAnthropic('')).toBe(false);
   });
 
   test('alias-chain conflict: forward + reverse for same id (Codex F6)', async () => {

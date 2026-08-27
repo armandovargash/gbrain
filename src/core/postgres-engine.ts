@@ -6,7 +6,7 @@ import type {
   ReservedConnection,
   DreamVerdict, DreamVerdictInput,
   FileSpec, FileRow,
-  TakeBatchInput, Take, TakesListOpts, TakeHit, StaleTakeRow,
+  TakeBatchInput, Take, TakesListOpts, TakeHit, StaleTakeRow, TakeEmbeddingInput,
   TakeResolution, SynthesisEvidenceInput,
   TakesScorecard, TakesScorecardOpts, CalibrationBucket, CalibrationCurveOpts,
   FactRow, FactInsertStatus,
@@ -39,9 +39,9 @@ import type {
 } from './types.ts';
 import { MAX_SEARCH_LIMIT, clampSearchLimit } from './engine.ts';
 import { executeRawJsonb, type SqlValue } from './sql-query.ts';
-import { sanitizeForJsonb, buildLinkRows, buildTimelineRows } from './batch-rows.ts';
+import { sanitizeForJsonb, sanitizeText, buildLinkRows, buildTimelineRows } from './batch-rows.ts';
 import { runMigrations } from './migrate.ts';
-import { SCHEMA_SQL } from './schema-embedded.ts';
+import { SCHEMA_SQL } from './schema-embedded.generated.ts';
 import { verifySchema } from './schema-verify.ts';
 import { applyChunkEmbeddingIndexPolicy, dropZombieIndexes, hnswEfSearchFor, hnswIndexExpected, HNSW_EF_SEARCH_MAX } from './vector-index.ts';
 import {
@@ -85,6 +85,7 @@ import { drainBackgroundWorkBeforeDisconnect } from './background-work.ts';
 import { validateSlug, contentHash, isBlankBody, rowToPage, rowToStalePage, rowToChunk, rowToSearchResult, parseEmbedding, tryParseEmbedding, isUndefinedTableError, warnOncePerProcess } from './utils.ts';
 import { resolveBoostMap, resolveHardExcludes } from './search/source-boost.ts';
 import { buildSourceFactorCase, buildHardExcludeClause, buildVisibilityClause, buildBestPerPagePoolCte, buildOrFallbackWebsearchQuery, boundWebsearchQuery } from './search/sql-ranking.ts';
+import { privatePagesFilterFragment } from './search/private-visibility.ts';
 import { unverifiedExtractionFragment } from './extraction-review.ts';
 import { DEFAULT_EMBEDDING_MODEL, DEFAULT_EMBEDDING_DIMENSIONS } from './ai/defaults.ts';
 import { DELETE_BATCH_SIZE } from './engine-constants.ts';
@@ -93,6 +94,8 @@ import { shouldExcludeFromOrphanReporting, loadOrphanPolicyOverrides } from './o
 import { LINK_EXTRACTOR_VERSION_TS } from './link-extraction.ts';
 import { EMBED_SKIP_FILTER_FRAGMENT } from './embed-skip.ts';
 import { QUARANTINE_FILTER_FRAGMENT } from './quarantine.ts';
+import { acquireInitSchemaAdvisoryLock } from './postgres-engine/init-schema-lock.ts';
+import { applyPostgresForwardReferenceBootstrap } from './postgres-engine/forward-reference-bootstrap.ts';
 import * as factsImpl from './postgres-engine/facts.ts';
 import type { PgFactsDeps } from './postgres-engine/facts.ts';
 import * as takesImpl from './postgres-engine/takes.ts';
@@ -101,6 +104,9 @@ import * as codeEdgesImpl from './postgres-engine/code-edges.ts';
 import type { PgCodeEdgesDeps } from './postgres-engine/code-edges.ts';
 import * as salienceImpl from './postgres-engine/salience.ts';
 import type { PgSalienceDeps } from './postgres-engine/salience.ts';
+import { hasCJK } from './cjk.ts';
+import { searchKeywordCJK as searchKeywordCJKImpl } from './postgres-engine/cjk-search.ts';
+import type { CjkKeywordCtx } from './search/cjk-keyword-sql.ts';
 
 function escapeSqlStringLiteral(value: string): string {
   return value.replace(/'/g, "''");
@@ -453,7 +459,11 @@ export class PostgresEngine implements BrainEngine {
       caller: 'PostgresEngine.initSchema',
     });
     // Lock-census (PR6 D5): INTENTIONALLY brain-global (session lock, fixed key 42) — initSchema DDL mutates the whole database; a per-source key would let two initSchema calls deadlock on shared DDL.
-    await conn`SELECT pg_advisory_lock(42)`;
+    // #2898: deadlined pg_try_advisory_lock loop + stderr heartbeat instead of
+    // an unbounded pg_advisory_lock — a leaked pooler session holding key 42
+    // hung every gbrain invocation forever with no output. On timeout the
+    // error names the holder pid with pg_terminate_backend recovery guidance.
+    await acquireInitSchemaAdvisoryLock((q) => conn.unsafe(q));
     try {
       // Pre-schema bootstrap: add forward-referenced state the embedded schema
       // blob requires but that older brains don't have yet (issues #366/#375/
@@ -504,24 +514,10 @@ export class PostgresEngine implements BrainEngine {
   /**
    * Bootstrap state that SCHEMA_SQL forward-references but that older brains
    * don't have yet. Mirror of `PGLiteEngine#applyForwardReferenceBootstrap`
-   * in shape and intent. Currently covers:
-   *
-   *   - `sources` table + default seed (FK target of pages.source_id) — v0.18
-   *   - `pages.source_id` column (indexed by `idx_pages_source_id`) — v0.18
-   *   - `links.link_source` column (indexed by `idx_links_source`) — v0.13
-   *   - `links.origin_page_id` column (indexed by `idx_links_origin`) — v0.13
-   *   - `content_chunks.symbol_name` column (indexed by `idx_chunks_symbol_name`) — v0.19
-   *   - `content_chunks.language` column (indexed by `idx_chunks_language`) — v0.19
-   *   - `content_chunks.search_vector` + `parent_symbol_path` + `doc_comment`
-   *     + `symbol_name_qualified` columns (indexed by `idx_chunks_search_vector`
-   *     and `idx_chunks_symbol_qualified`) — v0.20 Cathedral II
-   *   - `pages.deleted_at` column (indexed by `pages_deleted_at_purge_idx`) — v0.26.5
-   *   - `mcp_request_log.agent_name` + `params` + `error_message` columns
-   *     (indexed by `idx_mcp_log_agent_time`) — v0.26.3
-   *   - `subagent_messages.provider_id` column (indexed by
-   *     `idx_subagent_messages_provider`) — v0.27
-   *
-   * Keep this in sync with the PGLite version; covered by
+   * in shape and intent. The probe set + DDL live in the shared module
+   * `src/core/postgres-engine/forward-reference-bootstrap.ts` (#4477) so the
+   * standalone `db.initSchema()` SCHEMA_SQL-replay path runs the SAME
+   * bootstrap — keep that module in sync with the PGLite version; covered by
    * `test/schema-bootstrap-coverage.test.ts` (PGLite side) and
    * `test/e2e/postgres-bootstrap.test.ts` (Postgres side).
    */
@@ -531,581 +527,7 @@ export class PostgresEngine implements BrainEngine {
     // compatibility with any unit-test path that still calls bootstrap directly.
     // Production path always passes the DDL conn so bootstrap probes run inside
     // the same lock scope as SCHEMA_SQL replay.
-    const conn = injectedConn ?? this.sql;
-
-    // Single round-trip probe for every forward-reference target.
-    // current_schema() resolves to whatever search_path the connection uses,
-    // which matches schema-embedded.ts's `public.` references.
-    const probeRows = await conn<{
-      pages_exists: boolean;
-      source_id_exists: boolean;
-      deleted_at_exists: boolean;
-      effective_date_exists: boolean;
-      links_exists: boolean;
-      link_source_exists: boolean;
-      origin_page_id_exists: boolean;
-      chunks_exists: boolean;
-      symbol_name_exists: boolean;
-      language_exists: boolean;
-      search_vector_exists: boolean;
-      embedding_image_exists: boolean;
-      mcp_log_exists: boolean;
-      agent_name_exists: boolean;
-      subagent_messages_exists: boolean;
-      subagent_provider_id_exists: boolean;
-      ingest_log_exists: boolean;
-      ingest_log_source_id_exists: boolean;
-      files_exists: boolean;
-      files_source_id_exists: boolean;
-      files_page_id_exists: boolean;
-      oauth_clients_exists: boolean;
-      oauth_clients_source_id_exists: boolean;
-      oauth_clients_federated_read_exists: boolean;
-      oauth_clients_surface_exists: boolean;
-      oauth_clients_surface_set_by_exists: boolean;
-      sources_exists: boolean;
-      sources_archived_exists: boolean;
-      sources_archived_at_exists: boolean;
-      sources_archive_expires_at_exists: boolean;
-    }[]>`
-      SELECT
-        EXISTS (SELECT 1 FROM information_schema.tables
-                WHERE table_schema = current_schema() AND table_name = 'pages') AS pages_exists,
-        EXISTS (SELECT 1 FROM information_schema.columns
-                WHERE table_schema = current_schema() AND table_name = 'pages' AND column_name = 'source_id') AS source_id_exists,
-        EXISTS (SELECT 1 FROM information_schema.columns
-                WHERE table_schema = current_schema() AND table_name = 'pages' AND column_name = 'deleted_at') AS deleted_at_exists,
-        EXISTS (SELECT 1 FROM information_schema.columns
-                WHERE table_schema = current_schema() AND table_name = 'pages' AND column_name = 'effective_date') AS effective_date_exists,
-        EXISTS (SELECT 1 FROM information_schema.tables
-                WHERE table_schema = current_schema() AND table_name = 'links') AS links_exists,
-        EXISTS (SELECT 1 FROM information_schema.columns
-                WHERE table_schema = current_schema() AND table_name = 'links' AND column_name = 'link_source') AS link_source_exists,
-        EXISTS (SELECT 1 FROM information_schema.columns
-                WHERE table_schema = current_schema() AND table_name = 'links' AND column_name = 'origin_page_id') AS origin_page_id_exists,
-        EXISTS (SELECT 1 FROM information_schema.tables
-                WHERE table_schema = current_schema() AND table_name = 'content_chunks') AS chunks_exists,
-        EXISTS (SELECT 1 FROM information_schema.columns
-                WHERE table_schema = current_schema() AND table_name = 'content_chunks' AND column_name = 'symbol_name') AS symbol_name_exists,
-        EXISTS (SELECT 1 FROM information_schema.columns
-                WHERE table_schema = current_schema() AND table_name = 'content_chunks' AND column_name = 'language') AS language_exists,
-        EXISTS (SELECT 1 FROM information_schema.columns
-                WHERE table_schema = current_schema() AND table_name = 'content_chunks' AND column_name = 'search_vector') AS search_vector_exists,
-        EXISTS (SELECT 1 FROM information_schema.columns
-                WHERE table_schema = current_schema() AND table_name = 'content_chunks' AND column_name = 'embedding_image') AS embedding_image_exists,
-        EXISTS (SELECT 1 FROM information_schema.tables
-                WHERE table_schema = current_schema() AND table_name = 'mcp_request_log') AS mcp_log_exists,
-        EXISTS (SELECT 1 FROM information_schema.columns
-                WHERE table_schema = current_schema() AND table_name = 'mcp_request_log' AND column_name = 'agent_name') AS agent_name_exists,
-        EXISTS (SELECT 1 FROM information_schema.tables
-                WHERE table_schema = current_schema() AND table_name = 'subagent_messages') AS subagent_messages_exists,
-        EXISTS (SELECT 1 FROM information_schema.columns
-                WHERE table_schema = current_schema() AND table_name = 'subagent_messages' AND column_name = 'provider_id') AS subagent_provider_id_exists,
-        EXISTS (SELECT 1 FROM information_schema.tables
-                WHERE table_schema = current_schema() AND table_name = 'ingest_log') AS ingest_log_exists,
-        EXISTS (SELECT 1 FROM information_schema.columns
-                WHERE table_schema = current_schema() AND table_name = 'ingest_log' AND column_name = 'source_id') AS ingest_log_source_id_exists,
-        EXISTS (SELECT 1 FROM information_schema.tables
-                WHERE table_schema = current_schema() AND table_name = 'files') AS files_exists,
-        EXISTS (SELECT 1 FROM information_schema.columns
-                WHERE table_schema = current_schema() AND table_name = 'files' AND column_name = 'source_id') AS files_source_id_exists,
-        EXISTS (SELECT 1 FROM information_schema.columns
-                WHERE table_schema = current_schema() AND table_name = 'files' AND column_name = 'page_id') AS files_page_id_exists,
-        EXISTS (SELECT 1 FROM information_schema.tables
-                WHERE table_schema = current_schema() AND table_name = 'oauth_clients') AS oauth_clients_exists,
-        EXISTS (SELECT 1 FROM information_schema.columns
-                WHERE table_schema = current_schema() AND table_name = 'oauth_clients' AND column_name = 'source_id') AS oauth_clients_source_id_exists,
-        EXISTS (SELECT 1 FROM information_schema.columns
-                WHERE table_schema = current_schema() AND table_name = 'oauth_clients' AND column_name = 'federated_read') AS oauth_clients_federated_read_exists,
-        EXISTS (SELECT 1 FROM information_schema.columns
-                WHERE table_schema = current_schema() AND table_name = 'oauth_clients' AND column_name = 'surface') AS oauth_clients_surface_exists,
-        EXISTS (SELECT 1 FROM information_schema.columns
-                WHERE table_schema = current_schema() AND table_name = 'oauth_clients' AND column_name = 'surface_set_by') AS oauth_clients_surface_set_by_exists,
-        EXISTS (SELECT 1 FROM information_schema.tables
-                WHERE table_schema = current_schema() AND table_name = 'sources') AS sources_exists,
-        EXISTS (SELECT 1 FROM information_schema.columns
-                WHERE table_schema = current_schema() AND table_name = 'sources' AND column_name = 'archived') AS sources_archived_exists,
-        EXISTS (SELECT 1 FROM information_schema.columns
-                WHERE table_schema = current_schema() AND table_name = 'sources' AND column_name = 'archived_at') AS sources_archived_at_exists,
-        EXISTS (SELECT 1 FROM information_schema.columns
-                WHERE table_schema = current_schema() AND table_name = 'sources' AND column_name = 'archive_expires_at') AS sources_archive_expires_at_exists,
-        EXISTS (SELECT 1 FROM information_schema.columns
-                WHERE table_schema = current_schema() AND table_name = 'pages' AND column_name = 'last_retrieved_at') AS pages_last_retrieved_at_exists,
-        EXISTS (SELECT 1 FROM information_schema.columns
-                WHERE table_schema = current_schema() AND table_name = 'pages' AND column_name = 'ingested_via') AS pages_ingested_via_exists,
-        EXISTS (SELECT 1 FROM information_schema.columns
-                WHERE table_schema = current_schema() AND table_name = 'pages' AND column_name = 'ingested_at') AS pages_ingested_at_exists,
-        EXISTS (SELECT 1 FROM information_schema.columns
-                WHERE table_schema = current_schema() AND table_name = 'pages' AND column_name = 'source_uri') AS pages_source_uri_exists,
-        EXISTS (SELECT 1 FROM information_schema.columns
-                WHERE table_schema = current_schema() AND table_name = 'pages' AND column_name = 'source_kind') AS pages_source_kind_exists,
-        EXISTS (SELECT 1 FROM information_schema.columns
-                WHERE table_schema = current_schema() AND table_name = 'pages' AND column_name = 'contextual_retrieval_mode') AS pages_cr_mode_exists,
-        EXISTS (SELECT 1 FROM information_schema.columns
-                WHERE table_schema = current_schema() AND table_name = 'pages' AND column_name = 'corpus_generation') AS pages_corpus_generation_exists,
-        EXISTS (SELECT 1 FROM information_schema.columns
-                WHERE table_schema = current_schema() AND table_name = 'sources' AND column_name = 'contextual_retrieval_mode') AS sources_cr_mode_exists,
-        EXISTS (SELECT 1 FROM information_schema.columns
-                WHERE table_schema = current_schema() AND table_name = 'sources' AND column_name = 'trust_frontmatter_overrides') AS sources_trust_fm_exists,
-        EXISTS (SELECT 1 FROM information_schema.columns
-                WHERE table_schema = current_schema() AND table_name = 'pages' AND column_name = 'generation') AS pages_generation_exists,
-        EXISTS (SELECT 1 FROM information_schema.columns
-                WHERE table_schema = current_schema() AND table_name = 'pages' AND column_name = 'embedding_signature') AS pages_embedding_signature_exists,
-        EXISTS (SELECT 1 FROM information_schema.columns
-                WHERE table_schema = current_schema() AND table_name = 'pages' AND column_name = 'links_extracted_at') AS pages_links_extracted_at_exists,
-        EXISTS (SELECT 1 FROM information_schema.tables
-                WHERE table_schema = current_schema() AND table_name = 'timeline_entries') AS timeline_entries_exists,
-        EXISTS (SELECT 1 FROM information_schema.columns
-                WHERE table_schema = current_schema() AND table_name = 'timeline_entries' AND column_name = 'event_page_id') AS timeline_event_page_id_exists,
-        EXISTS (SELECT 1 FROM information_schema.tables
-                WHERE table_schema = current_schema() AND table_name = 'minion_jobs') AS minion_jobs_exists,
-        EXISTS (SELECT 1 FROM information_schema.columns
-                WHERE table_schema = current_schema() AND table_name = 'minion_jobs' AND column_name = 'timeout_at') AS minion_jobs_timeout_at_exists,
-        EXISTS (SELECT 1 FROM information_schema.columns
-                WHERE table_schema = current_schema() AND table_name = 'minion_jobs' AND column_name = 'idempotency_key') AS minion_jobs_idempotency_key_exists,
-        EXISTS (SELECT 1 FROM information_schema.columns
-                WHERE table_schema = current_schema() AND table_name = 'minion_jobs' AND column_name = 'private_queue_owner_job_id') AS minion_jobs_pq_owner_exists,
-        EXISTS (SELECT 1 FROM information_schema.columns
-                WHERE table_schema = current_schema() AND table_name = 'minion_jobs' AND column_name = 'private_queue_owner_token') AS minion_jobs_pq_token_exists,
-        EXISTS (SELECT 1 FROM information_schema.columns
-                WHERE table_schema = current_schema() AND table_name = 'minion_jobs' AND column_name = 'private_queue_lease_until') AS minion_jobs_pq_lease_exists
-    `;
-    const probe = probeRows[0]!;
-
-    const needsPagesBootstrap = probe.pages_exists && !probe.source_id_exists;
-    const needsLinksBootstrap = probe.links_exists
-      && (!probe.link_source_exists || !probe.origin_page_id_exists);
-    const needsChunksBootstrap = probe.chunks_exists
-      && (!probe.symbol_name_exists || !probe.language_exists || !probe.search_vector_exists);
-    // v0.26.5: pages_deleted_at_purge_idx in SCHEMA_SQL crashes if the column
-    // doesn't exist yet. Migration v34 also adds it, but bootstrap runs first.
-    const needsPagesDeletedAt = probe.pages_exists && !probe.deleted_at_exists;
-    // v0.26.3 (v33): idx_mcp_log_agent_time in SCHEMA_SQL needs agent_name col.
-    const needsMcpLogBootstrap = probe.mcp_log_exists && !probe.agent_name_exists;
-    // v0.27 (v36): idx_subagent_messages_provider in SCHEMA_SQL needs provider_id
-    // (the SECOND column in the composite index `(job_id, provider_id)`).
-    const needsSubagentProviderId = probe.subagent_messages_exists && !probe.subagent_provider_id_exists;
-    // v0.27.1 (v39): idx_chunks_embedding_image partial HNSW in SCHEMA_SQL
-    // references embedding_image. Use embedding_image_exists as the proxy for
-    // both v39 columns; modality is added in the same migration.
-    const needsChunksEmbeddingImage = probe.chunks_exists && !probe.embedding_image_exists;
-    // v0.29.1 (v40 + v41): pages_coalesce_date_idx expression index in SCHEMA_SQL
-    // references effective_date. Use effective_date_exists as the proxy for the
-    // five v40 + v41 pages columns (emotional_weight, effective_date,
-    // effective_date_source, import_filename, salience_touched_at).
-    const needsPagesRecency = probe.pages_exists && !probe.effective_date_exists;
-    // v0.31.2 (v50): idx_ingest_log_source_type_created in SCHEMA_SQL references
-    // source_id. Old brains have ingest_log without source_id; bootstrap adds
-    // the column before SCHEMA_SQL replay creates the index.
-    const needsIngestLogSourceId = probe.ingest_log_exists && !probe.ingest_log_source_id_exists;
-    // v0.18 (v18): files.source_id + files.page_id added; idx_files_source_id
-    // and idx_files_page_id in SCHEMA_SQL crash without them.
-    const needsFilesBootstrap = probe.files_exists
-      && (!probe.files_source_id_exists || !probe.files_page_id_exists);
-    // v0.34.1 (v60+v61+v65): oauth_clients.source_id + federated_read added;
-    // FK to sources(id) + GIN index idx_oauth_clients_federated_read in
-    // SCHEMA_SQL crash without them.
-    const needsOauthClientsBootstrap = probe.oauth_clients_exists
-      && (!probe.oauth_clients_source_id_exists || !probe.oauth_clients_federated_read_exists);
-    // WP4 (v127): oauth_clients.surface + surface_set_by. No SCHEMA_SQL index
-    // references them, but the columns are migration-added AND in the blob's
-    // CREATE TABLE — the exact v121 mask class — so the bootstrap adds them
-    // defense-in-depth (and satisfies the MIGRATIONS ADD COLUMN coverage
-    // gate). They ship in one migration and go missing together.
-    const probeSurface = probe as {
-      oauth_clients_surface_exists?: boolean;
-      oauth_clients_surface_set_by_exists?: boolean;
-    };
-    const needsOauthClientsSurface = probe.oauth_clients_exists
-      && (!probeSurface.oauth_clients_surface_exists || !probeSurface.oauth_clients_surface_set_by_exists);
-    // v0.26.5 (v34): sources.archived + archived_at + archive_expires_at added
-    // for soft-delete lifecycle. SCHEMA_SQL's `CREATE TABLE IF NOT EXISTS sources`
-    // is a no-op on pre-existing sources tables (won't add columns), so the
-    // visibility filters in search/list_pages trip on old brains. Bootstrap
-    // closes the gap before any visibility-filter SQL runs.
-    const needsSourcesArchive = probe.sources_exists
-      && (!probe.sources_archived_exists
-          || !probe.sources_archived_at_exists
-          || !probe.sources_archive_expires_at_exists);
-    // v0.37.0 (v79): pages_last_retrieved_at_idx in SCHEMA_SQL references
-    // last_retrieved_at. Pre-v79 brains crash without the column; bootstrap
-    // adds it before SCHEMA_SQL replay creates the index. v79 runs later
-    // via runMigrations and is idempotent.
-    const needsPagesLastRetrievedAt = probe.pages_exists && !(probe as { pages_last_retrieved_at_exists?: boolean }).pages_last_retrieved_at_exists;
-    // v0.38.0 (v80): provenance columns. Not referenced by any SCHEMA_SQL
-    // index/FK today; bootstrap exists for the column-only forward-
-    // reference class defense-in-depth.
-    const probeProv = probe as {
-      pages_ingested_via_exists?: boolean;
-      pages_ingested_at_exists?: boolean;
-      pages_source_uri_exists?: boolean;
-      pages_source_kind_exists?: boolean;
-    };
-    const needsPagesProvenance = probe.pages_exists
-      && (!probeProv.pages_ingested_via_exists
-          || !probeProv.pages_ingested_at_exists
-          || !probeProv.pages_source_uri_exists
-          || !probeProv.pages_source_kind_exists);
-    // v0.40.3.0 (v90, renumbered from v0.40.3.0 v81 on master merge):
-    // contextual retrieval columns on pages + sources. Defense-in-depth.
-    const probeCr = probe as {
-      pages_cr_mode_exists?: boolean;
-      pages_corpus_generation_exists?: boolean;
-      sources_cr_mode_exists?: boolean;
-      sources_trust_fm_exists?: boolean;
-      pages_generation_exists?: boolean;
-      pages_embedding_signature_exists?: boolean;
-      pages_links_extracted_at_exists?: boolean;
-      timeline_entries_exists?: boolean;
-      timeline_event_page_id_exists?: boolean;
-      minion_jobs_exists?: boolean;
-      minion_jobs_timeout_at_exists?: boolean;
-      minion_jobs_idempotency_key_exists?: boolean;
-      minion_jobs_pq_owner_exists?: boolean;
-      minion_jobs_pq_token_exists?: boolean;
-      minion_jobs_pq_lease_exists?: boolean;
-    };
-    const needsContextualRetrievalColumns = (probe.pages_exists
-        && (!probeCr.pages_cr_mode_exists || !probeCr.pages_corpus_generation_exists))
-      || (probe.sources_exists
-          && (!probeCr.sources_cr_mode_exists || !probeCr.sources_trust_fm_exists));
-    // v0.40.3.0 (v91): pages.generation BIGINT bumped by
-    // bump_page_generation_trg. pages_generation_idx in SCHEMA_SQL references
-    // it. Pre-v91 brains crash without the column; bootstrap adds it before
-    // SCHEMA_SQL replay creates the index.
-    const needsPagesGeneration = probe.pages_exists && !probeCr.pages_generation_exists;
-    // v0.41.31 (v108): pages.embedding_signature for real stale semantics.
-    // No SCHEMA_SQL index references it; bootstrap is defense-in-depth.
-    const needsPagesEmbeddingSignature = probe.pages_exists && !probeCr.pages_embedding_signature_exists;
-    // v0.42.7 (v112): pages.links_extracted_at link-extraction freshness
-    // watermark. pages_links_extracted_at_idx in SCHEMA_SQL references it;
-    // pre-v112 brains crash without the column, so bootstrap adds it before
-    // SCHEMA_SQL replay creates the index. v112 runs later via runMigrations
-    // and is idempotent.
-    const needsPagesLinksExtractedAt = probe.pages_exists && !probeCr.pages_links_extracted_at_exists;
-    // v121: schema-blob indexes reference event_page_id before migrations run.
-    const needsTimelineEventPageId = probeCr.timeline_entries_exists === true
-      && !probeCr.timeline_event_page_id_exists;
-    // v7-era (#2626 class sweep): minion_jobs.timeout_at + idempotency_key are
-    // migration-added AND referenced by blob indexes (idx_minion_jobs_timeout,
-    // uniq_minion_jobs_idempotency) — a pre-v7 minion_jobs wedges blob replay
-    // exactly like the v121 incident.
-    const needsMinionJobsTimeoutAt = probeCr.minion_jobs_exists === true
-      && !probeCr.minion_jobs_timeout_at_exists;
-    const needsMinionJobsIdempotencyKey = probeCr.minion_jobs_exists === true
-      && !probeCr.minion_jobs_idempotency_key_exists;
-    // Token rides the probe too: a token-only-missing brain (partial upgrade)
-    // would otherwise be unrepairable — the ALTER block adds all three.
-    const needsMinionJobsPrivateQueue = probeCr.minion_jobs_exists === true
-      && (!probeCr.minion_jobs_pq_owner_exists || !probeCr.minion_jobs_pq_token_exists
-          || !probeCr.minion_jobs_pq_lease_exists);
-
-    if (!needsPagesBootstrap && !needsLinksBootstrap && !needsChunksBootstrap
-        && !needsPagesDeletedAt && !needsMcpLogBootstrap && !needsSubagentProviderId
-        && !needsChunksEmbeddingImage && !needsPagesRecency
-        && !needsIngestLogSourceId && !needsFilesBootstrap
-        && !needsOauthClientsBootstrap && !needsOauthClientsSurface
-        && !needsSourcesArchive
-        && !needsPagesLastRetrievedAt
-        && !needsPagesProvenance
-        && !needsContextualRetrievalColumns && !needsPagesGeneration
-        && !needsPagesEmbeddingSignature
-        && !needsPagesLinksExtractedAt
-        && !needsTimelineEventPageId
-        && !needsMinionJobsTimeoutAt && !needsMinionJobsIdempotencyKey
-        && !needsMinionJobsPrivateQueue) return;
-
-    process.stderr.write('  Pre-v0.21 brain detected, applying forward-reference bootstrap\n');
-
-    if (needsPagesBootstrap) {
-      // Mirror schema-embedded.ts's `sources` shape so the subsequent
-      // SCHEMA_SQL CREATE TABLE IF NOT EXISTS is a true no-op.
-      // Archive columns (v34) are folded in here so a pre-v18 brain doesn't
-      // need needsSourcesArchive to also fire — bootstrap creates a complete
-      // v34-shape sources in one go. needsSourcesArchive then only fires on
-      // the pre-v34 case (sources exists, archive cols don't).
-      await conn.unsafe(`
-        CREATE TABLE IF NOT EXISTS sources (
-          id                 TEXT PRIMARY KEY,
-          name               TEXT NOT NULL UNIQUE,
-          local_path         TEXT,
-          last_commit        TEXT,
-          last_sync_at       TIMESTAMPTZ,
-          config             JSONB NOT NULL DEFAULT '{}'::jsonb,
-          archived           BOOLEAN NOT NULL DEFAULT FALSE,
-          archived_at        TIMESTAMPTZ,
-          archive_expires_at TIMESTAMPTZ,
-          created_at         TIMESTAMPTZ NOT NULL DEFAULT now()
-        );
-        INSERT INTO sources (id, name, config)
-          VALUES ('default', 'default', '{"federated": true}'::jsonb)
-          ON CONFLICT (id) DO NOTHING;
-        ALTER TABLE pages ADD COLUMN IF NOT EXISTS source_id TEXT
-          NOT NULL DEFAULT 'default' REFERENCES sources(id) ON DELETE CASCADE;
-      `);
-    }
-
-    if (needsLinksBootstrap) {
-      // v11 (links_provenance_columns) handles the CHECK constraint, the
-      // UNIQUE swap, and the backfill. The bootstrap only adds enough state
-      // for SCHEMA_SQL's `CREATE INDEX idx_links_source/origin` not to crash.
-      // v11 runs later via runMigrations and is idempotent.
-      await conn.unsafe(`
-        ALTER TABLE links ADD COLUMN IF NOT EXISTS link_source TEXT;
-        ALTER TABLE links ADD COLUMN IF NOT EXISTS origin_page_id INTEGER
-          REFERENCES pages(id) ON DELETE SET NULL;
-      `);
-    }
-
-    if (needsChunksBootstrap) {
-      // v26 (content_chunks_code_metadata) adds symbol_name + language; v27
-      // (Cathedral II) adds parent_symbol_path + doc_comment +
-      // symbol_name_qualified + search_vector. The schema blob has indexes
-      // (idx_chunks_search_vector line 141, idx_chunks_symbol_qualified
-      // line 142) that need the v27 columns to exist before they run.
-      // v26 + v27 run later via runMigrations and are idempotent.
-      await conn.unsafe(`
-        ALTER TABLE content_chunks ADD COLUMN IF NOT EXISTS language TEXT;
-        ALTER TABLE content_chunks ADD COLUMN IF NOT EXISTS symbol_name TEXT;
-        ALTER TABLE content_chunks ADD COLUMN IF NOT EXISTS parent_symbol_path TEXT[];
-        ALTER TABLE content_chunks ADD COLUMN IF NOT EXISTS doc_comment TEXT;
-        ALTER TABLE content_chunks ADD COLUMN IF NOT EXISTS symbol_name_qualified TEXT;
-        ALTER TABLE content_chunks ADD COLUMN IF NOT EXISTS search_vector TSVECTOR;
-      `);
-    }
-
-    if (needsPagesDeletedAt) {
-      // v34 (destructive_guard_columns) adds the column + sources columns +
-      // partial purge index. Bootstrap only adds enough for SCHEMA_SQL's
-      // `CREATE INDEX pages_deleted_at_purge_idx ... WHERE deleted_at IS NOT NULL`
-      // not to crash. v34 runs later via runMigrations and is idempotent.
-      await conn.unsafe(`
-        ALTER TABLE pages ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;
-      `);
-    }
-
-    if (needsMcpLogBootstrap) {
-      // v33 (admin_dashboard_columns_v0_26_3) adds agent_name + params +
-      // error_message to mcp_request_log. SCHEMA_SQL's
-      // `CREATE INDEX idx_mcp_log_agent_time ON mcp_request_log(agent_name,...)`
-      // crashes without agent_name. v33 runs later via runMigrations and is
-      // idempotent (and also handles backfill).
-      await conn.unsafe(`
-        ALTER TABLE mcp_request_log ADD COLUMN IF NOT EXISTS agent_name TEXT;
-        ALTER TABLE mcp_request_log ADD COLUMN IF NOT EXISTS params JSONB;
-        ALTER TABLE mcp_request_log ADD COLUMN IF NOT EXISTS error_message TEXT;
-      `);
-    }
-
-    if (needsSubagentProviderId) {
-      // v36 (subagent_provider_neutral_persistence_v0_27) adds provider_id +
-      // schema_version on subagent_messages and subagent_tool_executions.
-      // SCHEMA_SQL's `CREATE INDEX idx_subagent_messages_provider ON
-      // subagent_messages (job_id, provider_id)` crashes without provider_id
-      // (composite-index second column). v36 runs later via runMigrations and
-      // is idempotent.
-      await conn.unsafe(`
-        ALTER TABLE subagent_messages ADD COLUMN IF NOT EXISTS provider_id TEXT;
-      `);
-    }
-
-    if (needsChunksEmbeddingImage) {
-      // v39 (multimodal_dual_column_v0_27_1) adds modality + embedding_image
-      // columns to content_chunks plus a partial HNSW index that references
-      // embedding_image. Bootstrap mirrors enough state for SCHEMA_SQL's
-      // `CREATE INDEX idx_chunks_embedding_image ... WHERE embedding_image IS NOT NULL`
-      // not to crash. v39 runs later via runMigrations and is idempotent.
-      await conn.unsafe(`
-        ALTER TABLE content_chunks ADD COLUMN IF NOT EXISTS modality TEXT NOT NULL DEFAULT 'text';
-        ALTER TABLE content_chunks ADD COLUMN IF NOT EXISTS embedding_image vector(1024);
-      `);
-    }
-
-    if (needsPagesRecency) {
-      // v40 (pages_emotional_weight) adds emotional_weight; v41
-      // (pages_recency_columns) adds effective_date + effective_date_source +
-      // import_filename + salience_touched_at and the
-      // `pages_coalesce_date_idx ON pages ((COALESCE(effective_date, updated_at)))`
-      // expression index. SCHEMA_SQL's CREATE INDEX for that expression crashes
-      // before v41 runs. Bootstrap adds all five additive columns; v40 + v41
-      // run later via runMigrations and are idempotent.
-      await conn.unsafe(`
-        ALTER TABLE pages ADD COLUMN IF NOT EXISTS emotional_weight      REAL NOT NULL DEFAULT 0.0;
-        ALTER TABLE pages ADD COLUMN IF NOT EXISTS effective_date        TIMESTAMPTZ;
-        ALTER TABLE pages ADD COLUMN IF NOT EXISTS effective_date_source TEXT;
-        ALTER TABLE pages ADD COLUMN IF NOT EXISTS import_filename       TEXT;
-        ALTER TABLE pages ADD COLUMN IF NOT EXISTS salience_touched_at   TIMESTAMPTZ;
-      `);
-    }
-
-    if (needsIngestLogSourceId) {
-      // v50 (ingest_log_source_id) adds source_id +
-      // idx_ingest_log_source_type_created composite index. SCHEMA_SQL's
-      // CREATE INDEX (source_id, source_type, created_at) crashes without
-      // source_id. Bootstrap adds the column with NOT NULL DEFAULT 'default'
-      // so the index can build cleanly.
-      await conn.unsafe(`
-        ALTER TABLE ingest_log ADD COLUMN IF NOT EXISTS source_id TEXT NOT NULL DEFAULT 'default';
-      `);
-    }
-
-    if (needsFilesBootstrap) {
-      // v18 (files_provenance_columns) adds source_id + page_id to files plus
-      // idx_files_source_id and idx_files_page_id in SCHEMA_SQL. Pre-v18 brains
-      // crash on the CREATE INDEX. Bootstrap adds both columns; v18 runs later
-      // via runMigrations and is idempotent.
-      await conn.unsafe(`
-        ALTER TABLE files ADD COLUMN IF NOT EXISTS source_id TEXT
-          NOT NULL DEFAULT 'default' REFERENCES sources(id) ON DELETE CASCADE;
-        ALTER TABLE files ADD COLUMN IF NOT EXISTS page_id INTEGER
-          REFERENCES pages(id) ON DELETE SET NULL;
-      `);
-    }
-
-    if (needsOauthClientsBootstrap) {
-      // v60+v61+v65 (oauth_clients_source_id_fk, oauth_clients_federated_read_column,
-      // oauth_clients_federated_read_gin_index) add source_id + federated_read
-      // and the GIN index idx_oauth_clients_federated_read. SCHEMA_SQL's
-      // FK + index references crash on pre-v60 brains. Bootstrap mirrors the
-      // v60+v61 column shape; v60-v65 run later via runMigrations and are
-      // idempotent (and handle backfill + the v64 RESTRICT-flip).
-      await conn.unsafe(`
-        ALTER TABLE oauth_clients ADD COLUMN IF NOT EXISTS source_id TEXT
-          DEFAULT 'default' REFERENCES sources(id) ON DELETE SET NULL;
-        ALTER TABLE oauth_clients ADD COLUMN IF NOT EXISTS federated_read TEXT[]
-          NOT NULL DEFAULT '{}';
-      `);
-    }
-
-    if (needsOauthClientsSurface) {
-      // WP4 (v127): per-client MCP tool surface + operator-lock marker.
-      // Nullable TEXT, no index — bootstrap mirrors the v127 column shape so
-      // the blob's CREATE TABLE presence can't mask the forward reference on
-      // pre-v127 brains (the v121 wedge class). v127 runs later via
-      // runMigrations and is idempotent. Mirror of the PGLite bootstrap.
-      await conn.unsafe(`
-        ALTER TABLE oauth_clients ADD COLUMN IF NOT EXISTS surface TEXT;
-        ALTER TABLE oauth_clients ADD COLUMN IF NOT EXISTS surface_set_by TEXT;
-      `);
-    }
-
-    if (needsSourcesArchive) {
-      // v34 (destructive_guard_columns) promotes archive lifecycle from JSONB
-      // config to real columns on sources. SCHEMA_SQL's `CREATE TABLE IF NOT EXISTS
-      // sources` is a no-op against an existing pre-v34 sources table, so the
-      // column-add never lands until the v34 migration runs. v34's UPDATE
-      // statements + downstream visibility filters (search/query/list_pages)
-      // need the columns to exist on the table schema. Bootstrap adds the
-      // three columns; v34 runs later via runMigrations and is idempotent
-      // (and handles JSONB → column backfill).
-      await conn.unsafe(`
-        ALTER TABLE sources ADD COLUMN IF NOT EXISTS archived BOOLEAN NOT NULL DEFAULT FALSE;
-        ALTER TABLE sources ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ;
-        ALTER TABLE sources ADD COLUMN IF NOT EXISTS archive_expires_at TIMESTAMPTZ;
-      `);
-    }
-
-    if (needsPagesLastRetrievedAt) {
-      // v79 (pages_last_retrieved_at): adds the real stale-page signal column
-      // + full B-tree index. SCHEMA_SQL's CREATE INDEX
-      // pages_last_retrieved_at_idx crashes without the column. v79 runs
-      // later via runMigrations and is idempotent.
-      await conn.unsafe(`
-        ALTER TABLE pages ADD COLUMN IF NOT EXISTS last_retrieved_at TIMESTAMPTZ;
-      `);
-    }
-
-    if (needsPagesProvenance) {
-      // v81 (pages_provenance_columns): four nullable columns added by the
-      // v0.38 ingestion cathedral. No SCHEMA_SQL index/FK references them
-      // today; bootstrap exists defense-in-depth so future schema work that
-      // does reference them doesn't wedge pre-v81 brains.
-      await conn.unsafe(`
-        ALTER TABLE pages ADD COLUMN IF NOT EXISTS ingested_via TEXT;
-        ALTER TABLE pages ADD COLUMN IF NOT EXISTS ingested_at TIMESTAMPTZ;
-        ALTER TABLE pages ADD COLUMN IF NOT EXISTS source_uri TEXT;
-        ALTER TABLE pages ADD COLUMN IF NOT EXISTS source_kind TEXT;
-      `);
-    }
-
-    if (needsContextualRetrievalColumns) {
-      // v0.40.3.0 v90 (contextual_retrieval_columns, renumbered from
-      // v0.40.3.0 v81 on master merge). Five additive columns wiring the
-      // three-tier wrapper ladder. Defense-in-depth probes; v90 runs later
-      // via runMigrations and is idempotent (ADD COLUMN IF NOT EXISTS).
-      await conn.unsafe(`
-        ALTER TABLE pages ADD COLUMN IF NOT EXISTS contextual_retrieval_mode TEXT;
-        ALTER TABLE pages ADD COLUMN IF NOT EXISTS corpus_generation TEXT;
-        ALTER TABLE sources ADD COLUMN IF NOT EXISTS contextual_retrieval_mode TEXT;
-        ALTER TABLE sources ADD COLUMN IF NOT EXISTS trust_frontmatter_overrides BOOLEAN NOT NULL DEFAULT FALSE;
-      `);
-    }
-
-    if (needsPagesGeneration) {
-      // v0.40.3.0 v91 (pages_generation_trigger_and_bookmark):
-      // pages.generation BIGINT. SCHEMA_SQL CREATE INDEX
-      // pages_generation_idx ON pages (generation) crashes on pre-v91 brains
-      // without this. The trigger and index land via v91 migration run
-      // later; bootstrap only adds the column. v91 is idempotent.
-      await conn.unsafe(`
-        ALTER TABLE pages ADD COLUMN IF NOT EXISTS generation BIGINT NOT NULL DEFAULT 1;
-      `);
-    }
-
-    if (needsPagesEmbeddingSignature) {
-      // v108 (pages_embedding_signature): embedding provenance for real stale
-      // semantics. NULL grandfathered. v108 runs later via runMigrations and
-      // is idempotent.
-      await conn.unsafe(`
-        ALTER TABLE pages ADD COLUMN IF NOT EXISTS embedding_signature TEXT;
-      `);
-    }
-
-    if (needsPagesLinksExtractedAt) {
-      // v112 (pages_links_extracted_at): link-extraction freshness watermark.
-      // pages_links_extracted_at_idx in SCHEMA_SQL references it, so bootstrap
-      // adds the column before the blob's CREATE INDEX runs. The index itself
-      // lands via the blob (CREATE INDEX IF NOT EXISTS) and v112 (CONCURRENTLY);
-      // bootstrap only adds the column. v112 runs later via runMigrations and is
-      // idempotent.
-      await conn.unsafe(`
-        ALTER TABLE pages ADD COLUMN IF NOT EXISTS links_extracted_at TIMESTAMPTZ;
-      `);
-    }
-
-    if (needsTimelineEventPageId) {
-      // Add only the forward-referenced column. Migration v121 remains the
-      // source of truth for the FK and indexes and runs idempotently afterward.
-      await conn.unsafe(`
-        ALTER TABLE timeline_entries ADD COLUMN IF NOT EXISTS event_page_id INTEGER;
-      `);
-    }
-
-    if (needsMinionJobsTimeoutAt) {
-      // v7: blob index idx_minion_jobs_timeout references timeout_at; a
-      // pre-v7 minion_jobs wedges blob replay without it (same class as v121).
-      await conn.unsafe(`
-        ALTER TABLE minion_jobs ADD COLUMN IF NOT EXISTS timeout_at TIMESTAMPTZ;
-      `);
-    }
-    if (needsMinionJobsIdempotencyKey) {
-      // v7: blob index uniq_minion_jobs_idempotency references idempotency_key.
-      await conn.unsafe(`
-        ALTER TABLE minion_jobs ADD COLUMN IF NOT EXISTS idempotency_key TEXT;
-      `);
-    }
-    if (needsMinionJobsPrivateQueue) {
-      // v0.46.26: blob indexes idx_minion_jobs_private_queue_recovery /
-      // idx_minion_jobs_private_queue_owner reference the private-queue
-      // owner/lease columns; a pre-upgrade minion_jobs wedges blob replay
-      // without them (same class as v121). The token column is not indexed
-      // but rides along so upgraded rows carry the full lifecycle shape.
-      await conn.unsafe(`
-        ALTER TABLE minion_jobs ADD COLUMN IF NOT EXISTS private_queue_owner_job_id INTEGER REFERENCES minion_jobs(id) ON DELETE SET NULL;
-        ALTER TABLE minion_jobs ADD COLUMN IF NOT EXISTS private_queue_owner_token TEXT;
-        ALTER TABLE minion_jobs ADD COLUMN IF NOT EXISTS private_queue_lease_until TIMESTAMPTZ;
-      `);
-    }
+    await applyPostgresForwardReferenceBootstrap(injectedConn ?? this.sql);
   }
 
   async transaction<T>(fn: (engine: BrainEngine) => Promise<T>): Promise<T> {
@@ -1260,6 +682,9 @@ export class PostgresEngine implements BrainEngine {
             ? tx`AND source_id = ${sourceId}`
             : tx``;
       const deletedCondition = includeDeleted ? tx`` : tx`AND deleted_at IS NULL`;
+      // #3931: anchor on sourceIds[0] (caller's own resolved source, see
+      // localFederatedSourceIds) instead of a hardcoded 'default'.
+      const anchorSourceId = sourceIds && sourceIds.length > 0 ? sourceIds[0] : 'default';
       const rows = await tx`
         SELECT id, source_id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, created_at, updated_at, deleted_at,
                effective_date, effective_date_source,
@@ -1267,14 +692,11 @@ export class PostgresEngine implements BrainEngine {
                contextual_retrieval_mode
         FROM pages
         WHERE slug = ${slug} ${sourceCondition} ${deletedCondition}
-        ORDER BY (source_id = 'default') DESC, source_id ASC
+        ORDER BY (source_id = ${anchorSourceId}) DESC, source_id ASC
         LIMIT 1
       `;
-      // Deterministic multi-source tiebreak: without an ORDER BY, LIMIT 1 on a
-      // slug that exists in several sources returned an ARBITRARY row.
-      // Default-source-first (then stable alpha) — plain alpha would prefer
-      // e.g. 'archive' over 'default'. Engine parity: pglite-engine.ts carries
-      // the identical clause.
+      // Deterministic multi-source tiebreak: anchor-source-first, then stable
+      // alpha. Engine parity: pglite-engine.ts carries the identical clause.
       if (rows.length === 0) return null;
       return rowToPage(rows[0]);
     });
@@ -1363,7 +785,7 @@ export class PostgresEngine implements BrainEngine {
     const ingestedAt = (sourceKind || sourceUri || ingestedVia) ? new Date() : null;
     const rows = await sql`
       INSERT INTO pages (source_id, slug, type, page_kind, title, compiled_truth, timeline, frontmatter, content_hash, updated_at, effective_date, effective_date_source, import_filename, chunker_version, source_path, source_kind, source_uri, ingested_via, ingested_at)
-      VALUES (${sourceId}, ${slug}, ${page.type}, ${pageKind}, ${page.title}, ${page.compiled_truth}, ${page.timeline || ''}, ${sql.json(frontmatter as Parameters<typeof sql.json>[0])}, ${hash}, now(), ${effectiveDate}, ${effectiveDateSource}, ${importFilename}, COALESCE(${chunkerVersion}::smallint, ${MARKDOWN_CHUNKER_VERSION}), ${sourcePath}, ${sourceKind}, ${sourceUri}, ${ingestedVia}, ${ingestedAt})
+      VALUES (${sourceId}, ${slug}, ${page.type}, ${pageKind}, ${sanitizeText(page.title)}, ${sanitizeText(page.compiled_truth)}, ${sanitizeText(page.timeline || '')}, ${sql.json(frontmatter as Parameters<typeof sql.json>[0])}, ${hash}, now(), ${effectiveDate}, ${effectiveDateSource}, ${importFilename}, COALESCE(${chunkerVersion}::smallint, ${MARKDOWN_CHUNKER_VERSION}), ${sourcePath}, ${sourceKind}, ${sourceUri}, ${ingestedVia}, ${ingestedAt})
       ON CONFLICT (source_id, slug) DO UPDATE SET
         type = EXCLUDED.type,
         page_kind = EXCLUDED.page_kind,
@@ -1612,6 +1034,12 @@ export class PostgresEngine implements BrainEngine {
     const deletedCondition = filters?.includeDeleted === true
       ? sql``
       : sql`AND p.deleted_at IS NULL`;
+    // #4352: untrusted-caller private-page filter (see PageFilters.excludePrivate).
+    // Static code-provided fragment (never user input) — same sql.unsafe
+    // pattern as the PAGE_SORT_SQL whitelist below.
+    const privateCondition = filters?.excludePrivate === true
+      ? sql.unsafe(`AND ${privatePagesFilterFragment('p')}`)
+      : sql``;
     const effectiveAfterCondition = filters?.effective_after
       ? sql`AND p.effective_date >= ${filters.effective_after}::timestamptz`
       : sql``;
@@ -1631,7 +1059,7 @@ export class PostgresEngine implements BrainEngine {
       const rows = await tx`
         SELECT p.* FROM pages p
         ${tagJoin}
-        WHERE 1=1 ${typeCondition} ${tagCondition} ${updatedCondition} ${slugCondition} ${sourceCondition} ${deletedCondition} ${effectiveAfterCondition} ${effectiveBeforeCondition}
+        WHERE 1=1 ${typeCondition} ${tagCondition} ${updatedCondition} ${slugCondition} ${sourceCondition} ${deletedCondition} ${privateCondition} ${effectiveAfterCondition} ${effectiveBeforeCondition}
         ORDER BY ${orderBy} LIMIT ${limit} OFFSET ${offset}
       `;
       return rows.map(rowToPage);
@@ -1651,18 +1079,23 @@ export class PostgresEngine implements BrainEngine {
     });
   }
 
-  async listAllPageRefs(): Promise<Array<{ slug: string; source_id: string }>> {
+  async listAllPageRefs(): Promise<Array<{ slug: string; source_id: string; updated_at: Date }>> {
     // v0.32.8: cross-source page enumeration. ORDER BY (source_id, slug) for
     // deterministic iteration (F11) — same-slug-different-source pages stay
     // grouped predictably. WHERE deleted_at IS NULL matches default getPage
-    // visibility semantics (v0.26.5).
+    // visibility semantics (v0.26.5). #4304: updated_at projected so --since
+    // walks can filter refs before any full-page fetch.
     const sql = this.sql;
     const rows = await sql`
-      SELECT slug, source_id FROM pages
+      SELECT slug, source_id, updated_at FROM pages
       WHERE deleted_at IS NULL
       ORDER BY source_id, slug
     `;
-    return rows.map((r) => ({ slug: r.slug as string, source_id: r.source_id as string }));
+    return rows.map((r) => ({
+      slug: r.slug as string,
+      source_id: r.source_id as string,
+      updated_at: r.updated_at instanceof Date ? r.updated_at : new Date(r.updated_at as string),
+    }));
   }
 
   async listAllSources(opts?: {
@@ -1972,6 +1405,19 @@ export class PostgresEngine implements BrainEngine {
     const hardExcludePrefixes = resolveHardExcludes(opts?.exclude_slug_prefixes, opts?.include_slug_prefixes);
     const hardExcludeClause = buildHardExcludeClause('p.slug', hardExcludePrefixes);
 
+    // #3986: CJK query branch — engine parity with PGLite's v0.32.7
+    // fallback. websearch_to_tsquery with an ASCII-stemming config can't
+    // tokenize CJK, so the FTS path below returns empty; route to the
+    // shared term-by-term ILIKE fallback instead. ASCII path unchanged.
+    if (hasCJK(query)) {
+      return this._searchKeywordCJK(query, {
+        limit, offset, innerLimit, sourceFactorCase, hardExcludeClause,
+        visibilityClause: buildVisibilityClause('p', 's'),
+        detailFilter: detailLow ? `AND cc.chunk_source = 'compiled_truth'` : '',
+        opts, dedup: true,
+      });
+    }
+
     const params: unknown[] = [query];
     let typeClause = '';
     if (type) {
@@ -2038,7 +1484,7 @@ export class PostgresEngine implements BrainEngine {
     // archived sources. Joined `sources s` lets the predicate compile to a
     // column lookup. NOT bypassed by detail=high — soft-delete is a contract,
     // not a temporal preference.
-    const visibilityClause = buildVisibilityClause('p', 's');
+    const visibilityClause = buildVisibilityClause('p', 's', { excludePrivate: opts?.excludePrivate === true });
     // FTS config name (e.g. 'english', 'pt_br'). Validated by getFtsLanguage()
     // — safe to interpolate into raw SQL.
     const ftsLang = getFtsLanguage();
@@ -2145,7 +1591,7 @@ export class PostgresEngine implements BrainEngine {
     const sourceFactorCase = buildSourceFactorCase('p.slug', boostMap, opts?.detail);
     const hardExcludePrefixes = resolveHardExcludes(opts?.exclude_slug_prefixes, opts?.include_slug_prefixes);
     const hardExcludeClause = buildHardExcludeClause('p.slug', hardExcludePrefixes);
-    const visibilityClause = buildVisibilityClause('p', 's');
+    const visibilityClause = buildVisibilityClause('p', 's', { excludePrivate: opts?.excludePrivate === true });
     // FTS config name (e.g. 'english', 'pt_br'). Validated by getFtsLanguage()
     // — safe to interpolate into raw SQL.
     const ftsLang = getFtsLanguage();
@@ -2286,6 +1732,19 @@ export class PostgresEngine implements BrainEngine {
     const hardExcludePrefixes = resolveHardExcludes(opts?.exclude_slug_prefixes, opts?.include_slug_prefixes);
     const hardExcludeClause = buildHardExcludeClause('p.slug', hardExcludePrefixes);
 
+    // #3986: CJK branch — same fallback as searchKeyword but chunk-grain
+    // (no page-dedup). Parity with PGLite searchKeywordChunks.
+    if (hasCJK(query)) {
+      return this._searchKeywordCJK(query, {
+        limit, offset,
+        innerLimit: 0,             // unused on chunk-grain (no inner CTE)
+        sourceFactorCase, hardExcludeClause,
+        visibilityClause: buildVisibilityClause('p', 's'),
+        detailFilter: detailLow ? `AND cc.chunk_source = 'compiled_truth'` : '',
+        opts, dedup: false,
+      });
+    }
+
     const params: unknown[] = [query];
     let typeClause = '';
     if (type) {
@@ -2342,7 +1801,7 @@ export class PostgresEngine implements BrainEngine {
     const offsetParam = `$${params.length}`;
 
     // v0.26.5: visibility filter for searchKeywordChunks (anchor primitive).
-    const visibilityClause = buildVisibilityClause('p', 's');
+    const visibilityClause = buildVisibilityClause('p', 's', { excludePrivate: opts?.excludePrivate === true });
     // FTS config name (e.g. 'english', 'pt_br'). Validated by getFtsLanguage()
     // — safe to interpolate into raw SQL.
     const ftsLang = getFtsLanguage();
@@ -2386,6 +1845,24 @@ export class PostgresEngine implements BrainEngine {
       return await tx.unsafe(rawQuery, params as Parameters<typeof tx.unsafe>[1]);
     }, { alwaysTransaction: true });
     return rows.map(rowToSearchResult);
+  }
+
+  /**
+   * #3986: CJK keyword fallback (parity port of PGLite's v0.32.7 branch).
+   * SQL builds in the shared cjk-keyword-sql.ts; execution goes through the
+   * same scoped read transaction (RLS scope binding + 8s statement timeout)
+   * as the FTS keyword paths. See src/core/postgres-engine/cjk-search.ts.
+   */
+  private async _searchKeywordCJK(query: string, ctx: CjkKeywordCtx): Promise<SearchResult[]> {
+    return searchKeywordCJKImpl(
+      async (sqlText, params) =>
+        await this.withScopedReadTransaction(ctx.opts?.sourceIds, ctx.opts?.sourceId, async (tx) => {
+          await tx`SET LOCAL statement_timeout = '8s'`;
+          return await tx.unsafe(sqlText, params as Parameters<typeof tx.unsafe>[1]) as unknown as Record<string, unknown>[];
+        }, { alwaysTransaction: true }),
+      query,
+      ctx,
+    );
   }
 
   async searchVector(embedding: Float32Array, opts?: SearchOpts): Promise<SearchResult[]> {
@@ -2506,7 +1983,7 @@ export class PostgresEngine implements BrainEngine {
     // sees the same row count it always did. Pulling the predicate to the
     // outer SELECT would force the HNSW scan to over-fetch and post-filter,
     // wasting candidate slots on hidden rows.
-    const visibilityClause = buildVisibilityClause('p', 's');
+    const visibilityClause = buildVisibilityClause('p', 's', { excludePrivate: opts?.excludePrivate === true });
 
     // v0.36 Phase 3: 'embedding_multimodal' is the unified column populated
     // by `gbrain reindex --multimodal`. Carries BOTH text and image content
@@ -2867,12 +2344,17 @@ export class PostgresEngine implements BrainEngine {
         `$${paramIdx++}, ${embeddingImagePh})`,
       );
 
+      // NUL/lone-surrogate cleanup ONCE into a local shared by BOTH binds:
+      // the md5() embedded_text_hash input and the stored chunk_text must see
+      // the same bytes, or the hash diverges from the sanitized stored text
+      // (and the raw NUL would still abort the INSERT via the md5 param).
+      const sanitizedChunkText = sanitizeText(chunk.chunk_text);
       // Param push order MUST match placeholder allocation order.
       if (embeddingStr) params.push(embeddingStr);
       if (embeddingImageStr) params.push(embeddingImageStr);
-      if (embeddingStr) params.push(chunk.chunk_text); // embedded_text_hash md5() input
+      if (embeddingStr) params.push(sanitizedChunkText); // embedded_text_hash md5() input
       params.push(
-        pageId, chunk.chunk_index, chunk.chunk_text, chunk.chunk_source,
+        pageId, chunk.chunk_index, sanitizedChunkText, chunk.chunk_source,
         chunk.model || resolvedModel, chunk.token_count || null,
         chunk.language || null, chunk.symbol_name || null, chunk.symbol_type || null,
         chunk.start_line ?? null, chunk.end_line ?? null,
@@ -3409,19 +2891,23 @@ export class PostgresEngine implements BrainEngine {
     });
   }
 
-  async markPagesExtractedBatch(refs: Array<{ slug: string; source_id: string; extractedAt?: string }>, defaultExtractedAt: string): Promise<void> {
-    if (refs.length === 0) return;
+  async markPagesExtractedBatch(refs: Array<{ slug: string; source_id: string; extractedAt?: string }>, defaultExtractedAt: string): Promise<number> {
+    if (refs.length === 0) return 0;
     const slugs = refs.map(r => r.slug);
     const srcs = refs.map(r => r.source_id);
     // Per-ref timestamp (D4 race fix): extract --stale passes each row's read
     // updated_at; sites that omit it fall back to defaultExtractedAt.
     const tss = refs.map(r => r.extractedAt ?? defaultExtractedAt);
     const sql = this.sql;
-    await sql`
+    // #3957: count() makes the stamped-row count observable so callers
+    // (stampExtracted) can surface a wrong-source shortfall instead of
+    // claiming success while every ref missed. Mirrors the PGLite engine.
+    const result = await sql`
       UPDATE pages p SET links_extracted_at = v.ts::timestamptz
       FROM unnest(${slugs}::text[], ${srcs}::text[], ${tss}::text[]) AS v(slug, source_id, ts)
       WHERE p.slug = v.slug AND p.source_id = v.source_id
     `;
+    return result.count ?? 0;
   }
 
   // Links
@@ -3508,13 +2994,61 @@ export class PostgresEngine implements BrainEngine {
     return result.length;
   }
 
+  // #3674 — see BrainEngine.removeLinksByPagesAndSource JSDoc. Identical SQL
+  // shape in PGLiteEngine (parity). JSONB recordset binding (never
+  // JSON.stringify into ::jsonb — executeRawJsonb passes raw objects).
+  async removeLinksByPagesAndSource(
+    pages: Array<{ slug: string; source_id: string }>,
+    opts: {
+      linkSource: string;
+      keepTypedNerPairs?: Array<{
+        from_slug: string; from_source_id: string;
+        to_slug: string; to_source_id: string;
+      }>;
+    },
+  ): Promise<number> {
+    if (pages.length === 0) return 0;
+    const payload = { pages, keep: opts.keepTypedNerPairs ?? [] };
+    const rows = await executeRawJsonb(
+      this,
+      `WITH scope AS (
+         SELECT f.id AS from_id
+         FROM jsonb_to_recordset(($2::jsonb)->'pages') AS p(slug text, source_id text)
+         JOIN pages f ON f.slug = p.slug AND f.source_id = p.source_id
+       ),
+       keep AS (
+         SELECT f.id AS from_id, t.id AS to_id
+         FROM jsonb_to_recordset(($2::jsonb)->'keep') AS k(
+           from_slug text, from_source_id text, to_slug text, to_source_id text
+         )
+         JOIN pages f ON f.slug = k.from_slug AND f.source_id = k.from_source_id
+         JOIN pages t ON t.slug = k.to_slug AND t.source_id = k.to_source_id
+       )
+       DELETE FROM links l
+       USING scope s
+       WHERE l.from_page_id = s.from_id
+         AND l.link_source = $1
+         AND NOT (
+           COALESCE(l.link_kind, '') = 'typed_ner'
+           AND EXISTS (
+             SELECT 1 FROM keep k
+             WHERE k.from_id = l.from_page_id AND k.to_id = l.to_page_id
+           )
+         )
+       RETURNING 1`,
+      [opts.linkSource],
+      [payload],
+    );
+    return rows.length;
+  }
+
   async removeLink(
     from: string,
     to: string,
     linkType?: string,
     linkSource?: string,
     opts?: { fromSourceId?: string; toSourceId?: string },
-  ): Promise<void> {
+  ): Promise<number> {
     const sql = this.sql;
     const fromSrc = opts?.fromSourceId ?? 'default';
     const toSrc = opts?.toSourceId ?? 'default';
@@ -3522,34 +3056,44 @@ export class PostgresEngine implements BrainEngine {
     // optional constraints; all four combinations are valid. Each branch's
     // page-id subquery is source-qualified so multi-source brains don't
     // delete the wrong (from, to) pair.
+    // #4527: RETURNING 1 so the caller learns how many edges actually died —
+    // a zero-match delete must be distinguishable from a real removal.
     if (linkType !== undefined && linkSource !== undefined) {
-      await sql`
+      const rows = await sql`
         DELETE FROM links
         WHERE from_page_id = (SELECT id FROM pages WHERE slug = ${from} AND source_id = ${fromSrc})
           AND to_page_id = (SELECT id FROM pages WHERE slug = ${to} AND source_id = ${toSrc})
           AND link_type = ${linkType}
           AND link_source IS NOT DISTINCT FROM ${linkSource}
+        RETURNING 1
       `;
+      return rows.length;
     } else if (linkType !== undefined) {
-      await sql`
+      const rows = await sql`
         DELETE FROM links
         WHERE from_page_id = (SELECT id FROM pages WHERE slug = ${from} AND source_id = ${fromSrc})
           AND to_page_id = (SELECT id FROM pages WHERE slug = ${to} AND source_id = ${toSrc})
           AND link_type = ${linkType}
+        RETURNING 1
       `;
+      return rows.length;
     } else if (linkSource !== undefined) {
-      await sql`
+      const rows = await sql`
         DELETE FROM links
         WHERE from_page_id = (SELECT id FROM pages WHERE slug = ${from} AND source_id = ${fromSrc})
           AND to_page_id = (SELECT id FROM pages WHERE slug = ${to} AND source_id = ${toSrc})
           AND link_source IS NOT DISTINCT FROM ${linkSource}
+        RETURNING 1
       `;
+      return rows.length;
     } else {
-      await sql`
+      const rows = await sql`
         DELETE FROM links
         WHERE from_page_id = (SELECT id FROM pages WHERE slug = ${from} AND source_id = ${fromSrc})
           AND to_page_id = (SELECT id FROM pages WHERE slug = ${to} AND source_id = ${toSrc})
+        RETURNING 1
       `;
+      return rows.length;
     }
   }
 
@@ -3576,6 +3120,7 @@ export class PostgresEngine implements BrainEngine {
           JOIN pages t ON t.id = l.to_page_id
           LEFT JOIN pages o ON o.id = l.origin_page_id AND o.source_id = ANY(${ids}::text[])
           WHERE f.slug = ${slug} AND f.source_id = ANY(${ids}::text[]) AND t.source_id = ANY(${ids}::text[])
+            AND f.deleted_at IS NULL AND t.deleted_at IS NULL
         `;
         return rows as unknown as Link[];
       }
@@ -3583,6 +3128,9 @@ export class PostgresEngine implements BrainEngine {
       // two below preserve pre-v0.31.8 semantics. Without opts.sourceId, no
       // source filter (cross-source view for internal callers). With
       // opts.sourceId, scope the from-page lookup.
+      // #3754: all three arms filter soft-deleted endpoints (f/t deleted_at IS
+      // NULL) so links to/from soft-deleted pages stop voting in the graph,
+      // matching orphans/get/list/search visibility.
       if (opts?.sourceId) {
         const rows = await tx`
           SELECT f.slug as from_slug, f.source_id as from_source_id,
@@ -3595,6 +3143,7 @@ export class PostgresEngine implements BrainEngine {
           JOIN pages t ON t.id = l.to_page_id
           LEFT JOIN pages o ON o.id = l.origin_page_id
           WHERE f.slug = ${slug} AND f.source_id = ${opts.sourceId}
+            AND f.deleted_at IS NULL AND t.deleted_at IS NULL
         `;
         return rows as unknown as Link[];
       }
@@ -3609,6 +3158,7 @@ export class PostgresEngine implements BrainEngine {
         JOIN pages t ON t.id = l.to_page_id
         LEFT JOIN pages o ON o.id = l.origin_page_id
         WHERE f.slug = ${slug}
+          AND f.deleted_at IS NULL AND t.deleted_at IS NULL
       `;
       return rows as unknown as Link[];
     });
@@ -3635,10 +3185,12 @@ export class PostgresEngine implements BrainEngine {
           JOIN pages t ON t.id = l.to_page_id
           LEFT JOIN pages o ON o.id = l.origin_page_id AND o.source_id = ANY(${ids}::text[])
           WHERE t.slug = ${slug} AND t.source_id = ANY(${ids}::text[]) AND f.source_id = ANY(${ids}::text[])
+            AND f.deleted_at IS NULL AND t.deleted_at IS NULL
         `;
         return rows as unknown as Link[];
       }
-      // v0.31.8 (D16) + #2200: federated arm above is first; two below mirror getLinks.
+      // v0.31.8 (D16) + #2200: federated arm above is first; two below mirror getLinks
+      // (incl. the #3754 soft-delete endpoint filter on all three arms).
       if (opts?.sourceId) {
         const rows = await tx`
           SELECT f.slug as from_slug, f.source_id as from_source_id,
@@ -3651,6 +3203,7 @@ export class PostgresEngine implements BrainEngine {
           JOIN pages t ON t.id = l.to_page_id
           LEFT JOIN pages o ON o.id = l.origin_page_id
           WHERE t.slug = ${slug} AND t.source_id = ${opts.sourceId}
+            AND f.deleted_at IS NULL AND t.deleted_at IS NULL
         `;
         return rows as unknown as Link[];
       }
@@ -3665,6 +3218,7 @@ export class PostgresEngine implements BrainEngine {
         JOIN pages t ON t.id = l.to_page_id
         LEFT JOIN pages o ON o.id = l.origin_page_id
         WHERE t.slug = ${slug}
+          AND f.deleted_at IS NULL AND t.deleted_at IS NULL
       `;
       return rows as unknown as Link[];
     });
@@ -3791,6 +3345,7 @@ export class PostgresEngine implements BrainEngine {
              JOIN pages p2 ON p2.id = l.to_page_id
              WHERE g.depth < ${depth}
                AND NOT (p2.id = ANY(g.visited))
+               AND p2.deleted_at IS NULL
                ${stepScope}
              ORDER BY p2.slug ASC, p2.id ASC
              LIMIT ${cap})`
@@ -3800,12 +3355,13 @@ export class PostgresEngine implements BrainEngine {
             JOIN pages p2 ON p2.id = l.to_page_id
             WHERE g.depth < ${depth}
               AND NOT (p2.id = ANY(g.visited))
+              AND p2.deleted_at IS NULL
               ${stepScope}`;
     // Cycle prevention: visited array tracks page IDs already in the path.
     const rows = await sql`
       WITH RECURSIVE graph AS (
         SELECT p.id, p.slug, p.title, p.type, 0 as depth, ARRAY[p.id] as visited
-        FROM pages p WHERE p.slug = ${slug} ${seedScope}
+        FROM pages p WHERE p.slug = ${slug} AND p.deleted_at IS NULL ${seedScope}
 
         UNION ALL
 
@@ -3823,7 +3379,7 @@ export class PostgresEngine implements BrainEngine {
           (SELECT jsonb_agg(DISTINCT jsonb_build_object('to_slug', p3.slug, 'link_type', l2.link_type))
            FROM links l2
            JOIN pages p3 ON p3.id = l2.to_page_id
-           WHERE l2.from_page_id = g.id ${aggScope}),
+           WHERE l2.from_page_id = g.id AND p3.deleted_at IS NULL ${aggScope}),
           '[]'::jsonb
         ) as links
       FROM graph g
@@ -3882,12 +3438,15 @@ export class PostgresEngine implements BrainEngine {
         ? sql`AND pt.source_id = ${opts.sourceId}`
         : sql``;
 
+    // #3754: soft-deleted pages are excluded at seed, every recursive step, and
+    // the final SELECT joins — a deleted page neither anchors, relays, nor
+    // terminates a path (mirrors pglite-engine.traversePaths).
     let rows;
     if (direction === 'out') {
       rows = await sql`
         WITH RECURSIVE walk AS (
           SELECT p.id, p.slug, 0::int as depth, ARRAY[p.id] as visited
-          FROM pages p WHERE p.slug = ${slug} ${seedScope}
+          FROM pages p WHERE p.slug = ${slug} AND p.deleted_at IS NULL ${seedScope}
           UNION ALL
           SELECT p2.id, p2.slug, w.depth + 1, w.visited || p2.id
           FROM walk w
@@ -3895,6 +3454,7 @@ export class PostgresEngine implements BrainEngine {
           JOIN pages p2 ON p2.id = l.to_page_id
           WHERE w.depth < ${depth}
             AND NOT (p2.id = ANY(w.visited))
+            AND p2.deleted_at IS NULL
             AND (${!linkTypeMatches} OR l.link_type = ${linkType ?? ''})
             ${stepScope}
         )
@@ -3904,6 +3464,7 @@ export class PostgresEngine implements BrainEngine {
         JOIN links l ON l.from_page_id = w.id
         JOIN pages p2 ON p2.id = l.to_page_id
         WHERE w.depth < ${depth}
+          AND p2.deleted_at IS NULL
           AND (${!linkTypeMatches} OR l.link_type = ${linkType ?? ''})
           ${stepScope}
         ORDER BY depth, from_slug, to_slug
@@ -3912,7 +3473,7 @@ export class PostgresEngine implements BrainEngine {
       rows = await sql`
         WITH RECURSIVE walk AS (
           SELECT p.id, p.slug, 0::int as depth, ARRAY[p.id] as visited
-          FROM pages p WHERE p.slug = ${slug} ${seedScope}
+          FROM pages p WHERE p.slug = ${slug} AND p.deleted_at IS NULL ${seedScope}
           UNION ALL
           SELECT p2.id, p2.slug, w.depth + 1, w.visited || p2.id
           FROM walk w
@@ -3920,6 +3481,7 @@ export class PostgresEngine implements BrainEngine {
           JOIN pages p2 ON p2.id = l.from_page_id
           WHERE w.depth < ${depth}
             AND NOT (p2.id = ANY(w.visited))
+            AND p2.deleted_at IS NULL
             AND (${!linkTypeMatches} OR l.link_type = ${linkType ?? ''})
             ${stepScope}
         )
@@ -3929,6 +3491,7 @@ export class PostgresEngine implements BrainEngine {
         JOIN links l ON l.to_page_id = w.id
         JOIN pages p2 ON p2.id = l.from_page_id
         WHERE w.depth < ${depth}
+          AND p2.deleted_at IS NULL
           AND (${!linkTypeMatches} OR l.link_type = ${linkType ?? ''})
           ${stepScope}
         ORDER BY depth, from_slug, to_slug
@@ -3937,7 +3500,7 @@ export class PostgresEngine implements BrainEngine {
       rows = await sql`
         WITH RECURSIVE walk AS (
           SELECT p.id, 0::int as depth, ARRAY[p.id] as visited
-          FROM pages p WHERE p.slug = ${slug} ${seedScope}
+          FROM pages p WHERE p.slug = ${slug} AND p.deleted_at IS NULL ${seedScope}
           UNION ALL
           SELECT p2.id, w.depth + 1, w.visited || p2.id
           FROM walk w
@@ -3945,6 +3508,7 @@ export class PostgresEngine implements BrainEngine {
           JOIN pages p2 ON p2.id = CASE WHEN l.from_page_id = w.id THEN l.to_page_id ELSE l.from_page_id END
           WHERE w.depth < ${depth}
             AND NOT (p2.id = ANY(w.visited))
+            AND p2.deleted_at IS NULL
             AND (${!linkTypeMatches} OR l.link_type = ${linkType ?? ''})
             ${stepScope}
         )
@@ -3955,6 +3519,8 @@ export class PostgresEngine implements BrainEngine {
         JOIN pages pf ON pf.id = l.from_page_id
         JOIN pages pt ON pt.id = l.to_page_id
         WHERE w.depth < ${depth}
+          AND pf.deleted_at IS NULL
+          AND pt.deleted_at IS NULL
           AND (${!linkTypeMatches} OR l.link_type = ${linkType ?? ''})
           ${pfScope}
           ${ptScope}
@@ -4164,18 +3730,30 @@ export class PostgresEngine implements BrainEngine {
     return result;
   }
 
-  async getUnverifiedExtractionPageIds(pageIds: number[]): Promise<Set<number>> {
-    if (pageIds.length === 0) return new Set();
+  async getUnverifiedExtractionPageIds(
+    pageIds: number[],
+  ): Promise<Map<number, { unverified: boolean; status: string }>> {
+    const result = new Map<number, { unverified: boolean; status: string }>();
+    if (pageIds.length === 0) return result;
     const sql = this.sql;
-    // Predicate is the shared unverifiedExtractionFragment (issue #160) so
-    // this query and the SQL-side source-boost guard can never drift.
+    // Quarantine predicate is the shared unverifiedExtractionFragment (issue
+    // #160) so this query and the SQL-side source-boost guard can never
+    // drift. #4220 widened the projection: any page with a frontmatter
+    // `status` value is returned (draft/superseded/restricted/... surface on
+    // SearchResult.status); the fragment match stays the quarantine flag.
     const rows = await sql.unsafe(
-      `SELECT id FROM pages
+      `SELECT id,
+              (COALESCE(frontmatter, '{}'::jsonb) ->> 'status') AS status,
+              (${unverifiedExtractionFragment('pages')}) AS unverified
+       FROM pages
        WHERE id = ANY($1::int[])
-         AND ${unverifiedExtractionFragment('pages')}`,
+         AND (COALESCE(frontmatter, '{}'::jsonb) ->> 'status') IS NOT NULL`,
       [pageIds] as never,
     );
-    return new Set((rows as unknown as { id: number }[]).map((r) => Number(r.id)));
+    for (const r of rows as unknown as { id: number; status: string; unverified: boolean }[]) {
+      result.set(Number(r.id), { unverified: r.unverified === true, status: r.status });
+    }
+    return result;
   }
 
   async getPageTimestamps(slugs: string[]): Promise<Map<string, Date>> {
@@ -4241,6 +3819,7 @@ export class PostgresEngine implements BrainEngine {
   async findOrphanPages(opts?: {
     sourceId?: string;
     sourceIds?: string[];
+    mode?: 'inbound' | 'islanded';
   }): Promise<Array<{ slug: string; title: string; domain: string | null }>> {
     const sql = this.sql;
     // Soft-delete filter on BOTH sides:
@@ -4260,6 +3839,20 @@ export class PostgresEngine implements BrainEngine {
         : opts?.sourceId
           ? sql`AND p.source_id = ${opts.sourceId}`
           : sql``;
+    // #4524: default mode 'islanded' — identical predicate to getHealth's
+    // orphan_pages (no live inbound AND no live outbound; outbound counts
+    // only when its TARGET page is live, per gbrain#4153 endpoint liveness).
+    // mode 'inbound' preserves the legacy no-inbound-only view.
+    const outboundFilter =
+      (opts?.mode ?? 'islanded') === 'islanded'
+        ? sql`AND NOT EXISTS (
+            SELECT 1
+            FROM links l
+            JOIN pages tgt ON tgt.id = l.to_page_id
+            WHERE l.from_page_id = p.id
+              AND tgt.deleted_at IS NULL
+          )`
+        : sql``;
     const rows = await sql`
       SELECT
         p.slug,
@@ -4275,6 +3868,7 @@ export class PostgresEngine implements BrainEngine {
           WHERE l.to_page_id = p.id
             AND src.deleted_at IS NULL
         )
+        ${outboundFilter}
       ORDER BY p.slug
     `;
     return rows as unknown as Array<{ slug: string; title: string; domain: string | null }>;
@@ -4340,7 +3934,8 @@ export class PostgresEngine implements BrainEngine {
         throw new Error(`addTimelineEntry failed: page "${slug}" (source=${sourceId}) not found`);
       }
     }
-    // ON CONFLICT DO NOTHING via the (page_id, date, summary) unique index.
+    // ON CONFLICT DO NOTHING via the (page_id, date, md5(summary), source)
+    // unique index (#3737: md5-keyed so long summaries fit the btree row cap).
     // #3827: RETURNING 1 makes the outcome observable — 0 rows means either
     // page missing OR duplicate; with the existence check above (default) the
     // false return unambiguously means "deduplicated", and under
@@ -4354,7 +3949,7 @@ export class PostgresEngine implements BrainEngine {
       INSERT INTO timeline_entries (page_id, date, source, summary, detail)
       SELECT id, ${entry.date}::date, ${sanitizeForJsonb(entry.source || '')}, ${sanitizeForJsonb(entry.summary)}, ${sanitizeForJsonb(entry.detail || '')}
       FROM pages WHERE slug = ${slug} AND source_id = ${sourceId}
-      ON CONFLICT (page_id, date, summary, source) DO NOTHING
+      ON CONFLICT (page_id, date, md5(summary), source) DO NOTHING
       RETURNING 1
     `;
     return inserted.length > 0;
@@ -4378,8 +3973,8 @@ export class PostgresEngine implements BrainEngine {
        SELECT p.id, v.date::date, v.source, v.summary, v.detail
        FROM jsonb_to_recordset(($1::jsonb)->'rows')
          AS v(slug text, date text, source text, summary text, detail text, source_id text)
-       JOIN pages p ON p.slug = v.slug AND p.source_id = v.source_id
-       ON CONFLICT (page_id, date, summary, source) DO NOTHING
+       JOIN pages p ON p.slug = v.slug AND p.source_id = v.source_id AND p.deleted_at IS NULL
+       ON CONFLICT (page_id, date, md5(summary), source) DO NOTHING
        RETURNING 1`,
       [],
       [{ rows }],
@@ -4926,10 +4521,11 @@ export class PostgresEngine implements BrainEngine {
   }
 
   async insertFacts(
-    rows: Array<NewFact & { row_num: number; source_markdown_slug: string }>,
+    rows: Array<NewFact & { row_num: number; source_markdown_slug: string; superseded_by_row?: number }>,
     ctx: { source_id: string },
-  ): Promise<{ inserted: number; ids: number[] }> {
-    return factsImpl.insertFacts(this.factsDeps, rows, ctx);
+    opts?: { deleteForPageFirst?: { slug: string; excludeSourcePrefixes?: string[]; preserveExpiredLegacy?: boolean } },
+  ): Promise<{ inserted: number; ids: number[]; warnings: string[]; deleted: number }> {
+    return factsImpl.insertFacts(this.factsDeps, rows, ctx, opts);
   }
 
   async deleteFactsForPage(
@@ -5113,6 +4709,8 @@ export class PostgresEngine implements BrainEngine {
   async listStaleTakes(): Promise<StaleTakeRow[]> {
     return takesImpl.listStaleTakes(this.takesDeps);
   }
+
+  async updateTakeEmbeddings(rowsIn: TakeEmbeddingInput[], opts?: BatchOpts): Promise<number> { return takesImpl.updateTakeEmbeddings(this.takesDeps, rowsIn, opts); }
 
   async updateTake(
     pageId: number,
@@ -5637,6 +5235,17 @@ export class PostgresEngine implements BrainEngine {
         SELECT key FROM config WHERE key LIKE ${pattern} ESCAPE '\\' ORDER BY key
       `;
       return rows.map(r => r.key);
+    });
+  }
+
+  async getAllConfig(): Promise<Record<string, string>> {
+    return this.connRetry(async () => {
+      const rows = await this.sql<{ key: string; value: string }[]>`
+        SELECT key, value FROM config
+      `;
+      const out: Record<string, string> = {};
+      for (const row of rows) out[row.key] = row.value;
+      return out;
     });
   }
 

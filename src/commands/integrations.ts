@@ -518,7 +518,10 @@ function heartbeatDir(id: string): string {
   return gbrainPath('integrations', id);
 }
 
-function heartbeatPath(id: string): string {
+// Exported for features.ts's heartbeat-backed "configured" check — both
+// surfaces must agree on the gbrainPath-based location (GBRAIN home
+// overrides apply; a hardcoded $HOME/.gbrain would diverge).
+export function heartbeatPath(id: string): string {
   return join(heartbeatDir(id), 'heartbeat.jsonl');
 }
 
@@ -1678,7 +1681,10 @@ async function cmdInstall(args: string[]): Promise<void> {
       const { written, manifestPath } = await installRecipeIntoHostRepo(recipeId, opts);
       console.log(`[install] ${recipeId}: copied ${written} files into ${realpathSync(opts.target)}`);
       console.log(`[install] manifest: ${manifestPath}`);
-      if (!opts.dryRun) {
+      // Gate the pointer on the hint actually existing (#4292) — a recipe
+      // without a post-install-hint.md must not send the operator to a 404.
+      // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal -- manifestPath derives from a findRecipe()-validated bundle root (embedded recipes/ tree or the operator-set GBRAIN_RECIPES_DIR) joined with a literal filename; used only as an existsSync gate on printing a hint line, and `gbrain integrations` is wired only from cli.ts (trusted local, never MCP)
+      if (!opts.dryRun && existsSync(join(pathDirname(manifestPath), 'post-install-hint.md'))) {
         console.log('[install] next steps: see recipes/' + recipeId + '/install/post-install-hint.md');
       }
     }

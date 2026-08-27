@@ -61,7 +61,7 @@ describe('raw_transcript containment', () => {
     expect(body).not.toContain('root:');
     expect(warnSpy).toHaveBeenCalledTimes(1);
     const msg = String(warnSpy.mock.calls[0][0]);
-    expect(msg).toContain('absolute_path');
+    expect(msg).toContain('raw_transcript refused');
     expect(msg).not.toContain('/etc/passwd');
   });
 
@@ -71,7 +71,7 @@ describe('raw_transcript containment', () => {
     expect(body).not.toContain('root:');
     expect(warnSpy).toHaveBeenCalledTimes(1);
     const msg = String(warnSpy.mock.calls[0][0]);
-    expect(msg).toContain('outside_repo');
+    expect(msg).toContain('raw_transcript refused');
     expect(msg).not.toContain('etc/passwd');
   });
 
@@ -79,7 +79,7 @@ describe('raw_transcript containment', () => {
     const body = await readConversationBodyForParsing(fakeEngine(realRepo), pageWith('transcripts/escape.md'));
     expect(body).toBe(SUMMARY);
     expect(body).not.toContain('OUTSIDE SECRET');
-    expect(String(warnSpy.mock.calls[0][0])).toContain('outside_repo');
+    expect(String(warnSpy.mock.calls[0][0])).toContain('raw_transcript refused');
   });
 
   test('legitimate nested relative sidecar reads', async () => {

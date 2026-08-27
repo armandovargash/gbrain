@@ -71,6 +71,18 @@ export interface FactsBackstopCtx {
   visibility?: 'private' | 'world';
   /** Override the chat model (extract_facts forwards user's model param when set). */
   model?: string;
+  /**
+   * #4206: caller-supplied event time. Fallback ONLY — a valid_from the
+   * extractor derives from the turn itself wins; absent both, now(). Lets
+   * historical imports (old transcripts) avoid import-time stamping.
+   */
+  validFrom?: Date;
+  /**
+   * #4206: slug of the page/transcript the turn came from (e.g.
+   * 'meetings/2026-04-03'). Written to facts.context so the recall /
+   * context_pack / delta projections surface the provenance.
+   */
+  sourceSlug?: string;
 }
 
 /** Discriminated return shape based on FactsBackstopCtx.mode. */
@@ -346,10 +358,8 @@ export async function runFactsBackstop(
       try {
         await runPipeline(parsedPage, ctx, signal);
       } catch (err) {
-        const { classifyFactsAbsorbError, writeFactsAbsorbLog } = await import('./absorb-log.ts');
-        const reason = classifyFactsAbsorbError(err);
-        const msg = err instanceof Error ? err.message : String(err);
-        await writeFactsAbsorbLog(ctx.engine, parsedPage.slug, reason, msg, ctx.sourceId);
+        const { writeFactsAbsorbFailure } = await import('./absorb-log.ts');
+        await writeFactsAbsorbFailure(ctx.engine, parsedPage.slug, err, ctx.sourceId);
       }
     }, ctx.sessionId ?? parsedPage.slug);
 
@@ -487,6 +497,29 @@ async function runPipelineWithBody(
   ctx: FactsBackstopCtx,
   abortSignal?: AbortSignal,
 ): Promise<{ inserted: number; duplicate: number; superseded: number; fact_ids: number[]; entity_slugs: string[]; skipped_reason?: import('./extract.ts').ExtractFailureReason }> {
+  // #4210: outside a withBudgetTracker scope (extract_facts op, sweep,
+  // put_page backstop, checkpoint harvest, file/code import) the gateway's
+  // chat/embed calls were budget no-ops — real spend, zero audit rows.
+  // Install a record-only fallback tracker labeled by the entry point so
+  // every pipeline invocation is visible to accounting. Uncapped, so it can
+  // never throw BudgetExhausted (cost/runtime gates need a cap); the
+  // pipeline's failure surface is unchanged. An ambient tracker (cycle
+  // phases, transcripts ingest) wins — no double scope, labels preserved.
+  const { getCurrentBudgetTracker, withBudgetTracker } = await import('../ai/gateway.ts');
+  if (!getCurrentBudgetTracker()) {
+    const { BudgetTracker } = await import('../budget/budget-tracker.ts');
+    const fallback = new BudgetTracker({ label: `facts:${ctx.source}` });
+    return withBudgetTracker(fallback, () => runPipelineBodyInner(input, ctx, abortSignal));
+  }
+  return runPipelineBodyInner(input, ctx, abortSignal);
+}
+
+/** The actual pipeline body — always runs inside a BudgetTracker scope (#4210). */
+async function runPipelineBodyInner(
+  input: { turnText: string; isDreamGenerated: boolean; ref?: string },
+  ctx: FactsBackstopCtx,
+  abortSignal?: AbortSignal,
+): Promise<{ inserted: number; duplicate: number; superseded: number; fact_ids: number[]; entity_slugs: string[]; skipped_reason?: import('./extract.ts').ExtractFailureReason }> {
   const { extractFactsFromTurnWithOutcome, FactsExtractionError } = await import('./extract.ts');
   const { resolveEntitySlug } = await import('../entities/resolve.ts');
   const { cosineSimilarity } = await import('./classify.ts');
@@ -496,6 +529,10 @@ async function runPipelineWithBody(
     return { inserted: 0, duplicate: 0, superseded: 0, fact_ids: [], entity_slugs: [] };
   }
 
+  const filter = ctx.notabilityFilter ?? 'all';
+  const notabilityAdmission = filter === 'high-only'
+    ? { allowed: ['high'] as const, invalid: 'drop' as const }
+    : undefined;
   const outcome = await extractFactsFromTurnWithOutcome({
     turnText: input.turnText,
     sessionId: ctx.sessionId,
@@ -505,6 +542,7 @@ async function runPipelineWithBody(
     engine: ctx.engine,
     abortSignal,
     model: ctx.model,
+    notabilityAdmission,
   });
 
   if (!outcome.ok) {
@@ -531,7 +569,6 @@ async function runPipelineWithBody(
 
   const facts = outcome.facts;
 
-  const filter = ctx.notabilityFilter ?? 'all';
   // [ENG-8] Explicit ctx.visibility wins; unset resolves the operator-set
   // facts.default_visibility (fail-closed to 'private').
   const { resolveDefaultVisibility } = await import('./visibility.ts');
@@ -629,10 +666,16 @@ async function runPipelineWithBody(
   const legacyBucket: SurvivedFact[] = [];
   if (localPath === null) {
     if (!writeThroughDisabled) {
+      // #4489: name the REAL remedy. The sources dispatcher has no
+      // "update" verb — attaching a working tree to a path-less source goes
+      // through `gbrain sources add <id> --path <dir>` (the #3903
+      // non-destructive attach path in sources-ops.ts). Pinned by
+      // test/facts-backstop-remedy-verb.test.ts.
       warnOnce(
         'facts:thin-client-fallback',
         '[facts] sources.local_path unset for source_id=' + ctx.sourceId +
-        ' — falling through to DB-only inserts. Configure local_path via `gbrain sources update` to enable system-of-record fence writes.',
+        ' — falling through to DB-only inserts. Attach a working tree via `gbrain sources add ' + ctx.sourceId +
+        ' --path <dir>` to enable system-of-record fence writes.',
       );
     }
     for (const s of survived) legacyBucket.push(s);
@@ -651,6 +694,9 @@ async function runPipelineWithBody(
       source_session: f.source_session ?? null,
       confidence: f.confidence,
       embedding: f.embedding ?? null,
+      // #4206: caller event-time fallback + provenance context.
+      valid_from: f.valid_from ?? ctx.validFrom,
+      context: ctx.sourceSlug ?? null,
     };
     const result = await ctx.engine.insertFact(newFact, { source_id: ctx.sourceId }); // gbrain-allow-direct-insert: legacy DB-only fallback for unparented / thin-client facts (no entity page to fence onto)
     fact_ids.push(result.id);
@@ -676,10 +722,14 @@ async function runPipelineWithBody(
       kind: f.kind,
       notability: f.notability,
       source: f.source,
-      context: null,
+      // #4206: the caller's source_slug (which page/transcript the turn came
+      // from) lands in the fence context cell — visible in recall projections.
+      context: ctx.sourceSlug ?? null,
       visibility,
       confidence: f.confidence,
-      validFrom: f.valid_from ?? new Date(),
+      // #4206: extractor-derived date wins; then the caller's event time
+      // (historical imports); then import time.
+      validFrom: f.valid_from ?? ctx.validFrom ?? new Date(),
       embedding: f.embedding ?? null,
       sessionId: f.source_session ?? null,
     }));
@@ -717,6 +767,9 @@ async function runPipelineWithBody(
           source_session: f.source_session ?? null,
           confidence: f.confidence,
           embedding: f.embedding ?? null,
+          // #4206: caller event-time fallback + provenance context.
+          valid_from: f.valid_from ?? ctx.validFrom,
+          context: ctx.sourceSlug ?? null,
         };
         const legacyResult = await ctx.engine.insertFact(newFact, { source_id: ctx.sourceId }); // gbrain-allow-direct-insert: stub-guard / unresolvable-target fallback (no fenceable page or usable tree)
         fact_ids.push(legacyResult.id);
@@ -746,6 +799,9 @@ async function runPipelineWithBody(
           source_session: f.source_session ?? null,
           confidence: f.confidence,
           embedding: f.embedding ?? null,
+          // #4206: caller event-time fallback + provenance context.
+          valid_from: f.valid_from ?? ctx.validFrom,
+          context: ctx.sourceSlug ?? null,
         };
         const legacyResult = await ctx.engine.insertFact(newFact, { source_id: ctx.sourceId }); // gbrain-allow-direct-insert: DB-only fallback when the fence lane declined the write (write_through opt-out race / localPath echo)
         fact_ids.push(legacyResult.id);

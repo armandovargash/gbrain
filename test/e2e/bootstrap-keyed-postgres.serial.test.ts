@@ -27,7 +27,11 @@ import { hybridSearch } from '../../src/core/search/hybrid.ts';
 import { runSchemaTransition } from '../../src/core/retrieval-upgrade-planner.ts';
 import { assertSafeE2eDatabaseUrl } from '../helpers/db-guard.ts';
 import { extractTakesFromPages } from '../../src/core/extract-takes-from-pages.ts';
-import { configureGateway, resetGateway } from '../../src/core/ai/gateway.ts';
+import {
+  configureGateway,
+  resetGateway,
+  __unconfigureGatewayForTests,
+} from '../../src/core/ai/gateway.ts';
 import {
   verifyWorkspace,
   VERIFY_PROBE_SLUG,
@@ -219,6 +223,12 @@ describe.skipIf(!OPENAI && !ANTHROPIC)('keyed auto fact-extraction (LLM takes)',
       title: 'Keyed Extraction Probe',
       compiled_truth: PROSE,
     });
+    // #4473: takes are md-first — the probe page needs a real markdown home
+    // (a page with no locatable .md is skipped, never written DB-only).
+    const repo = join(root, 'brain');
+    mkdirSync(join(repo, 'concepts'), { recursive: true });
+    writeFileSync(join(repo, `${SLUG}.md`), `# Keyed Extraction Probe\n\n${PROSE}\n`, 'utf-8');
+    await engine.setConfig('sync.repo_path', repo);
   }, 120_000);
 
   afterAll(async () => {
@@ -231,7 +241,15 @@ describe.skipIf(!OPENAI && !ANTHROPIC)('keyed auto fact-extraction (LLM takes)',
 
   test('keyless → llm_unavailable, zero claims; keyed → a real fact/take lands', async () => {
     // Keyless contrast: no chat gateway ⇒ the sweep cannot extract anything.
-    resetGateway();
+    // NOT resetGateway(): since #3554 that re-applies the preload's test
+    // baseline, whose factory captures env: { ...process.env } — including
+    // the very ANTHROPIC/OPENAI key this describe is gated on (run-e2e.sh
+    // keeps provider keys via GBRAIN_TEST_KEEP_PROVIDER_KEYS=1). The gateway
+    // would come back chat-available and llm_unavailable could never be true.
+    // __unconfigureGatewayForTests() is the #3554 seam for asserting genuine
+    // no-gateway behavior; the preload's beforeEach restores the baseline
+    // before the next test.
+    __unconfigureGatewayForTests();
     const keyless = await extractTakesFromPages(engine, { bootstrapEnabled: true });
     expect(keyless.llm_unavailable).toBe(true);
     expect(keyless.claims_extracted).toBe(0);

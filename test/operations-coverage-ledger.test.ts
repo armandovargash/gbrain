@@ -150,6 +150,17 @@ const LEDGER: Record<string, string> = {
   reload_schema_pack: 'test/operations-schema-pack.test.ts',
   run_onboard: 'test/ops-run-onboard-scope-gate.serial.test.ts',
   run_skillopt: 'test/skillopt/run-skillopt-op.serial.test.ts',
+  // Covered by the C1 lifecycle behavioral suite (moved out of UNCOVERED).
+  get_job_progress: 'test/jobs-lifecycle-ops.test.ts',
+  pause_job: 'test/jobs-lifecycle-ops.test.ts',
+  resume_job: 'test/jobs-lifecycle-ops.test.ts',
+  replay_job: 'test/jobs-lifecycle-ops.test.ts',
+  // v0.46.28.0+ master-wave ops, mapped at the test-gap-wave master merge.
+  fetch: 'test/deep-research-fetch.test.ts',
+  get_usage: 'test/chat-usage.test.ts',
+  entity_identity_link: 'test/entity-identity.test.ts',
+  entity_identity_unlink: 'test/entity-identity.test.ts',
+  entity_identity_list: 'test/entity-identity.test.ts',
 };
 
 /**
@@ -160,10 +171,13 @@ const LEDGER: Record<string, string> = {
  * cover an op, move it to LEDGER, and drop it from here. Never add entries.
  */
 const UNCOVERED: string[] = [
-  'get_job_progress',
-  'pause_job',
-  'resume_job',
-  'replay_job',
+  // v0.46.31.0 chat-connectors wave (arrived via master merge): the two ops
+  // are localOnly thin wrappers over the connectors module (which has six
+  // behavioral suites, test/connectors-*.test.ts), but no test dispatches
+  // the OPS themselves yet. Entered at the test-gap-wave master merge while
+  // the four *_job seeds moved to LEDGER — the set still SHRANK (4 → 2).
+  'connector_sync',
+  'connectors_status',
 ];
 
 /** The seeded literal length of UNCOVERED. NEVER raise this number. */

@@ -26,7 +26,9 @@
  *   the only way to skip it is `--bare`, which forces ANTHROPIC_API_KEY
  *   auth and defeats the whole point of this provider. The ~42k cached
  *   tokens from user-level instructions are accepted as a cost-trivial
- *   trade-off on the subscription path.
+ *   trade-off on the subscription path. #4119: when those user-level
+ *   instructions must NOT leak into a measurement (SkillOpt rollouts),
+ *   set GBRAIN_CLAUDE_CLI_HERMETIC_CONFIG — see resolveHermeticConfigDir.
  *
  * doStream is not yet implemented; the model declares no streaming. Callers
  * (gateway.toolLoop primarily) use doGenerate.
@@ -34,8 +36,11 @@
 import { randomUUIDv7 } from 'bun';
 import { spawn } from 'node:child_process';
 import { mkdirSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import {
+  claudeCliConfigDir,
+  claudeCliCwdDir,
+  sweepDeadClaudeCliScratchDirs,
+} from './claude-cli-scratch.ts';
 import type {
   LanguageModelV2,
   LanguageModelV2CallOptions,
@@ -49,14 +54,53 @@ import type {
 function claudeBin(): string {
   return process.env.GBRAIN_CLAUDE_CLI_BIN ?? 'claude';
 }
-const CLAUDE_CWD = join(tmpdir(), `gbrain-claude-cli-cwd-${process.pid}`);
+// #4472: the per-PID dir names + the transcript-fingerprint predicate live in
+// claude-cli-scratch.ts so transcript discovery can exclude the sessions these
+// subprocess cwds mint under ~/.claude/projects/ without importing this module.
+const CLAUDE_CWD = claudeCliCwdDir();
 let cwdEnsured = false;
 function ensureCleanCwd(): string {
   if (!cwdEnsured) {
+    // #4472: the per-PID naming leaks one scratch dir per crashed/killed
+    // gbrain process forever — sweep dead-PID leftovers once per process at
+    // provider init. Best-effort: a sweep failure never breaks a chat call.
+    try { sweepDeadClaudeCliScratchDirs(); } catch { /* best-effort */ }
     mkdirSync(CLAUDE_CWD, { recursive: true });
     cwdEnsured = true;
   }
   return CLAUDE_CWD;
+}
+
+// #4119 — opt-in hermetic config dir for the child. See resolveHermeticConfigDir.
+const CLAUDE_HERMETIC_CONFIG = claudeCliConfigDir();
+let hermeticEnsured = false;
+/**
+ * Resolve the CLAUDE_CONFIG_DIR the child should run with when
+ * GBRAIN_CLAUDE_CLI_HERMETIC_CONFIG is set (#4119). Returns null when the
+ * knob is unset/off — the child then inherits the user's real config dir
+ * (today's behavior). `1`/`true` → a per-process empty tmpdir; any other
+ * non-empty value is used verbatim as the config-dir path.
+ *
+ * Opt-in, NOT default: on non-macOS installs the config dir also holds the
+ * OAuth session credentials, so pointing the child at an empty dir logs it
+ * out (macOS keeps credentials in the keychain and survives). SkillOpt runs
+ * that need hermetic measurements (no user-level CLAUDE.md / settings.json /
+ * hooks bleeding into rollouts) flip it deliberately — see
+ * docs/guides/skillopt.md, "Hermetic claude-cli rollouts".
+ */
+export function resolveHermeticConfigDir(
+  raw: string | undefined = process.env.GBRAIN_CLAUDE_CLI_HERMETIC_CONFIG,
+): string | null {
+  const v = raw?.trim();
+  if (!v || v === '0' || v.toLowerCase() === 'false') return null;
+  if (v === '1' || v.toLowerCase() === 'true') {
+    if (!hermeticEnsured) {
+      mkdirSync(CLAUDE_HERMETIC_CONFIG, { recursive: true });
+      hermeticEnsured = true;
+    }
+    return CLAUDE_HERMETIC_CONFIG;
+  }
+  return v;
 }
 
 /** Parsed shape of `claude --print --output-format json`. */
@@ -311,6 +355,12 @@ function runClaude(
     for (const k of Object.keys(env)) {
       if (k.startsWith('CLAUDE_CODE_USE_')) delete env[k];
     }
+    // #4119 opt-in hermetic config: point the child's CLAUDE_CONFIG_DIR at an
+    // isolated directory so user-level ~/.claude state (CLAUDE.md memory,
+    // settings.json, hooks) can't leak into measurements. Off by default —
+    // see resolveHermeticConfigDir for the auth caveat that makes it opt-in.
+    const hermeticConfigDir = resolveHermeticConfigDir();
+    if (hermeticConfigDir) env.CLAUDE_CONFIG_DIR = hermeticConfigDir;
     const child = spawn(claudeBin(), args, {
       stdio: ['pipe', 'pipe', 'pipe'],
       cwd: ensureCleanCwd(),

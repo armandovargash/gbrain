@@ -25,6 +25,7 @@
 import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { operations, type OperationContext } from '../src/core/operations.ts';
+import { linkEntityIdentity } from '../src/core/entity-identity.ts';
 
 let engine: PGLiteEngine;
 
@@ -114,6 +115,13 @@ const MATRIX: Row[] = [
   { name: 'get_page', mode: 'isolated', args: { slug: 'notes/beta-note' },
     controlSees: r => r !== null && JSON.stringify(r).includes('BETAMARKER'),
     expectScoped: r => { expect(r === null || leakToken(r) === null).toBe(true); } },
+  // v0.46.28.0+ master ops (mapped at the test-gap-wave master merge): fetch
+  // shares get_page's scope ladder; entity_identity_list filters members via
+  // identityReadScope.
+  { name: 'fetch', mode: 'isolated', args: { id: 'notes/beta-note' },
+    controlSees: r => r !== null && JSON.stringify(r).includes('BETAMARKER'),
+    expectScoped: r => { expect(r === null || leakToken(r) === null).toBe(true); } },
+  { name: 'entity_identity_list', mode: 'isolated', args: {} },
   { name: 'list_pages', mode: 'isolated', args: { limit: 100 } },
   { name: 'search', mode: 'isolated', args: { query: 'BETAMARKER', limit: 20 } },
   { name: 'query', mode: 'isolated', args: { query: 'BETAMARKER', limit: 20 } },
@@ -201,6 +209,11 @@ beforeAll(async () => {
       type: 'person', title: `${MARK} Stub`, compiled_truth: `${MARK} stub`,
       frontmatter: { provenance: 'auto-extracted', status: 'unverified' },
     }, { sourceId: src });
+    // Cross-source identity group so entity_identity_list has something to
+    // leak: the beta member's slug ('people/beta-person') is a LEAK_TOKEN.
+    await linkEntityIdentity(engine, {
+      entityId: 'matrix-person', slug: `people/${name}-person`, sourceId: src,
+    });
     await engine.addTag(`notes/${name}-note`, `${name}-topic`, { sourceId: src });
     await engine.addTag(`people/${name}-person`, `${name}-topic`, { sourceId: src });
     await engine.addLink(`notes/${name}-note`, `people/${name}-person`, `${MARK} ctx`, 'mentions', 'markdown', undefined, undefined, { fromSourceId: src, toSourceId: src });

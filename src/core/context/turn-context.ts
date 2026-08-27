@@ -74,6 +74,8 @@ export interface TurnContextFact {
   valid_from?: string;
   /** Recording time (v0.45.7) — delta's "new since" filter prefers this over valid_from. */
   created_at?: string;
+  /** #4206: provenance context (e.g. extract_facts' source_slug). */
+  context?: string | null;
   confidence: number;
 }
 
@@ -531,6 +533,11 @@ async function assembleDelta(
             ? { updatedAfterKeyset: { updatedAt: since, slug: opts.sinceSlug } }
             : { updated_after: since }),
           sourceId: opts.sourceId,
+          // Match the facts + entity-card arms: delta is world-only unless a
+          // trusted local caller explicitly sets includePrivate.  Without
+          // this engine-level filter, a default/remote delta exposed private
+          // page titles and slugs even though its fact payload was filtered.
+          excludePrivate: remote,
           limit: DELTA_PAGE_FETCH_LIMIT + 1,
           sort: 'updated_asc',
         });
@@ -569,6 +576,8 @@ async function assembleDelta(
             entity_slug: r.entity_slug,
             valid_from: r.valid_from.toISOString(),
             created_at: r.created_at.toISOString(),
+            // #4206: provenance context rides delta like the other projections.
+            context: r.context ?? null,
             confidence: r.confidence,
           }));
       } catch {
