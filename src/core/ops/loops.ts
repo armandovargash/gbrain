@@ -333,12 +333,30 @@ const open_loops: Operation = {
       g.loops.push(loopView(l, trusted, deepLinks));
     }
 
-    let backlinks = new Map<string, number>();
+    const backlinks = new Map<string, number>();
     try {
       const slugs = [...byKey.values()]
         .map((g) => g.counterparty_slug)
         .filter((s): s is string => s !== null);
-      if (slugs.length > 0) backlinks = await ctx.engine.getBacklinkCounts(slugs);
+      if (slugs.length > 0) {
+        // getBacklinkCounts takes numeric page ids (v0.46.35) — resolve the
+        // counterparty slugs within the loops' home sources first (same
+        // composite-key discipline as deepLinksFor), then fold back to slugs.
+        const srcIds = [...new Set([...byKey.values()].map((g) => g.source_id))];
+        const rows = await ctx.engine.executeRaw<{ id: number; slug: string }>(
+          `SELECT id, slug FROM pages
+           WHERE source_id = ANY(string_to_array($2, E'\\n'))
+             AND slug = ANY(string_to_array($1, E'\\n')) AND deleted_at IS NULL`,
+          [slugs.join('\n'), srcIds.join('\n')],
+        );
+        if (rows.length > 0) {
+          const counts = await ctx.engine.getBacklinkCounts(rows.map((r) => Number(r.id)));
+          for (const r of rows) {
+            const c = counts.get(Number(r.id));
+            if (c !== undefined) backlinks.set(r.slug, Math.max(backlinks.get(r.slug) ?? 0, c));
+          }
+        }
+      }
     } catch { /* rank without backlinks */ }
 
     const limit = Math.min(Math.max((p.limit as number | undefined) ?? 3, 1), 50);

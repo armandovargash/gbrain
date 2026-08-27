@@ -6260,7 +6260,37 @@ export const MIGRATIONS: Migration[] = [
     },
   },
   {
+    // Train port: renumbered 138 -> 142 -> 143 (wave-k pass 1 appended
+    // v138-v141 on the branch, then master consumed v142 for the
+    // takes-embedding resize above; LATEST_VERSION is Math.max so only the
+    // duplicate id needed fixing). Guarded DDL below is idempotent, so a
+    // brain that ran the branch's v142 spelling records v143 as a no-op.
     version: 143,
+    name: 'dream_verdicts_ttl',
+    // #4069 (reimplemented): 30-day TTL on the significance-verdict cache.
+    // `triage_version`/`model` (v129) already invalidate rows semantically,
+    // but nothing ever DELETED rows — verdicts for deleted or re-hashed
+    // transcripts lived forever. Reads treat expired rows as misses (so
+    // long-lived transcripts re-judge at a 30-day cadence, refreshing the
+    // TTL) and runPhaseSynthesize sweeps expired rows best-effort. Backfill
+    // derives expiry from judged_at so pre-TTL rows keep their original age
+    // instead of gaining a fresh 30 days. The interval literal mirrors
+    // DREAM_VERDICT_TTL_SECONDS (engine.ts) and the schema.sql default.
+    idempotent: true,
+    sql: `
+      ALTER TABLE dream_verdicts ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ;
+      UPDATE dream_verdicts
+        SET expires_at = judged_at + interval '30 days'
+        WHERE expires_at IS NULL;
+      ALTER TABLE dream_verdicts
+        ALTER COLUMN expires_at SET DEFAULT (now() + interval '30 days'),
+        ALTER COLUMN expires_at SET NOT NULL;
+      CREATE INDEX IF NOT EXISTS dream_verdicts_expires_idx
+        ON dream_verdicts (expires_at);
+    `,
+  },
+  {
+    version: 144,
     name: 'open_loops',
     // Gmail-first open-loop engine: the structured record behind
     // "who is waiting on you, what you promised". One row per open loop,
@@ -6275,6 +6305,18 @@ export const MIGRATIONS: Migration[] = [
     // the open_loops op (src/core/ops/loops.ts). Same DDL on both engines.
     idempotent: true,
     sql: `
+      -- Skew-guard re-apply of master's v143 (dream_verdicts_ttl) for
+      -- branch-tester DBs that recorded 142/143 before the renumber; all
+      -- statements are idempotent no-ops where v143 already ran.
+      ALTER TABLE dream_verdicts ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ;
+      UPDATE dream_verdicts
+        SET expires_at = judged_at + interval '30 days'
+        WHERE expires_at IS NULL;
+      ALTER TABLE dream_verdicts
+        ALTER COLUMN expires_at SET DEFAULT (now() + interval '30 days'),
+        ALTER COLUMN expires_at SET NOT NULL;
+      CREATE INDEX IF NOT EXISTS dream_verdicts_expires_idx
+        ON dream_verdicts (expires_at);
       CREATE TABLE IF NOT EXISTS open_loops (
         id                 BIGSERIAL PRIMARY KEY,
         source_id          TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
@@ -6316,12 +6358,14 @@ export const MIGRATIONS: Migration[] = [
         CONSTRAINT loop_suppressions_uniq UNIQUE (source_id, kind, value)
       );
     `,
-    // Skew guard (mirrors master's own v141→v142 renumber pattern): the
-    // gmail-open-loop-engine branch shipped open_loops AS v142 while master
-    // consumed v142 for takes_embedding_dimension_matches_config (#2089), so
-    // a brain that ran the branch pre-merge recorded version 142 and would
-    // skip master's v142 forever. Re-apply the takes resize here — the
-    // dimension check makes it a no-op everywhere it already ran.
+    // Skew guard (mirrors master's own renumber pattern): the
+    // gmail-open-loop-engine branch shipped open_loops as v142, then v143,
+    // while master consumed v142 (takes_embedding_dimension_matches_config,
+    // #2089) and v143 (dream_verdicts_ttl, #4069) — a brain that ran the
+    // branch pre-merge recorded 142/143 and would skip those forever. The
+    // sql above re-applies dream_verdicts_ttl (idempotent DDL) and this
+    // handler re-applies the takes resize (dimension check = no-op
+    // everywhere it already ran).
     handler: async (engine) => {
       const dimRows = await engine.executeRaw<{ value: string }>(
         `SELECT value FROM config WHERE key = 'embedding_dimensions'`,
@@ -6354,7 +6398,7 @@ export const MIGRATIONS: Migration[] = [
              WHERE active AND embedding IS NOT NULL`,
         );
       }
-      process.stderr.write(`  v143 skew guard: takes.embedding resized to vector(${embeddingDim})\n`);
+      process.stderr.write(`  v144 skew guard: takes.embedding resized to vector(${embeddingDim})\n`);
     },
   },
 ];

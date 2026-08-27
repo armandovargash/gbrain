@@ -816,7 +816,7 @@ CREATE INDEX IF NOT EXISTS idx_chat_usage_log_created
 CREATE INDEX IF NOT EXISTS idx_chat_usage_log_model
   ON chat_usage_log (model, created_at);
 
--- open_loops (migration v143): the Gmail-first open-loop engine's structured
+-- open_loops (migration v144): the Gmail-first open-loop engine's structured
 -- record — "who is waiting on you, what you promised". Deduped per source on
 -- dedup_key; loops close by state transition, never delete. fact_id projects
 -- LLM-extracted commitments into the facts table so entity cards see them.
@@ -853,7 +853,7 @@ CREATE INDEX IF NOT EXISTS open_loops_counterparty_idx
 CREATE INDEX IF NOT EXISTS open_loops_thread_idx
   ON open_loops (source_id, thread_id) WHERE status = 'open';
 
--- loop_suppressions (migration v143): \`gbrain loops mute <sender|thread>\` —
+-- loop_suppressions (migration v144): \`gbrain loops mute <sender|thread>\` —
 -- the detector's user feedback loop. Suppressed senders/threads never open
 -- new loops (existing loops keep their state).
 CREATE TABLE IF NOT EXISTS loop_suppressions (
@@ -1224,8 +1224,12 @@ CREATE TABLE IF NOT EXISTS dream_verdicts (
   entities         JSONB,
   model            TEXT,
   triage_version   INT,
+  -- #4069 (migration v138): 30-day verdict TTL. Reads treat expired rows as
+  -- misses; the synthesize phase sweeps them best-effort.
+  expires_at       TIMESTAMPTZ NOT NULL DEFAULT (now() + interval '30 days'),
   PRIMARY KEY (file_path, content_hash)
 );
+CREATE INDEX IF NOT EXISTS dream_verdicts_expires_idx ON dream_verdicts (expires_at);
 
 -- ============================================================
 -- Cycle coordination lock — v0.17 runCycle primitive

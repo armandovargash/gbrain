@@ -216,6 +216,7 @@ const entity: Operation = {
 // messages) ride `detail` only; the message carries the code.
 const SYNTHESIS_FAILURE_CODES: Record<string, string> = {
   not_json: 'LLM_OUTPUT_NOT_JSON',
+  output_truncated: 'LLM_OUTPUT_TRUNCATED',
   empty_answer: 'SYNTHESIS_EMPTY_ANSWER',
   llm_error: 'LLM_CALL_FAILED',
   model_unusable: 'MODEL_NOT_USABLE',
@@ -432,7 +433,7 @@ const STATUS_ENUM = ['inserted', 'duplicate', 'superseded'];
 // fallback or a typed `unavailable` error) and stay enum-listed so any
 // v1 server emitting them validates.
 const SYNTHESIS_STATUS_ENUM = [
-  'ok', 'empty_answer', 'not_json', 'no_llm', 'model_unusable', 'llm_error', 'extractive_fallback',
+  'ok', 'empty_answer', 'not_json', 'output_truncated', 'no_llm', 'model_unusable', 'llm_error', 'extractive_fallback',
 ];
 
 export const RESPONSE_SCHEMAS: Record<VerbName, Record<string, unknown>> = {
