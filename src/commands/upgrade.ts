@@ -2,6 +2,7 @@ import { execSync, execFileSync } from 'child_process';
 import { existsSync, readFileSync, writeFileSync, mkdirSync, appendFileSync, realpathSync } from 'fs';
 import { basename, join, dirname, resolve } from 'path';
 import { parseSemver, semverGt } from '../core/semver.ts';
+import { setCliExitVerdict } from '../core/cli-force-exit.ts';
 import { VERSION } from '../version.ts';
 
 const GBRAIN_GITHUB_REPO = 'garrytan/gbrain';
@@ -163,7 +164,7 @@ export async function runUpgrade(args: string[], opts: { targetVersion?: string 
         error: `still running ${newVersion} after upgrade`,
         hint: `bun add -g github:garrytan/gbrain#v${target}`,
       });
-      process.exitCode = 1;
+      setCliExitVerdict(1);
       return;
     }
     // Save old version for post-upgrade migration detection
