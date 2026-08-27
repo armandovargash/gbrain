@@ -68,6 +68,7 @@ test/connection-resilience.test.ts	Eng-review D3 — executeRaw has no per-call 
 test/contextual-retrieval-service-pure.test.ts	inline import contextual synopsis containment	1	readFileSync
 test/conversation-facts-type-allowlist-drift.test.ts	(file-level)	18	readFileSync
 test/cycle-abort.test.ts	#1972 — complete cooperative-abort coverage	3	readFileSync
+test/cycle-abort.test.ts	#4077 — synthesize/patterns cooperative-abort threading	3	readFileSync
 test/cycle-abort.test.ts	CycleOpts.signal contract (v0.20.5)	4	readFileSync
 test/cycle-abort.test.ts	autopilot-cycle handler contract (v0.20.5)	3	readFileSync
 test/cycle-drain-renewal.test.ts	db-lock heartbeat wiring (structural — issue #6 cancellation)	1	readFileSync
@@ -136,6 +137,10 @@ test/extract-workers.test.ts	extract.ts → workers wiring (T7)	10	readFileSync
 test/facts-backstop-remedy-verb.test.ts	facts backstop thin-client-fallback remedy verb (#4489)	3	readFileSync
 test/features.test.ts	CLI routing	2	bun-file
 test/fence-extraction.test.ts	Layer 8 D2 — markdown fence extraction	18	readFileSync
+test/files.test.ts	collectFiles (production import)	9	readFileSync
+test/files.test.ts	files upload-raw git-storage branch (#2297)	3	readFileSync
+test/files.test.ts	files verify git lane (per-source root resolution)	1	readFileSync
+test/files.test.ts	storage precondition — the silent-no-op class (#4022)	3	readFileSync
 test/filing-rules-resolution.serial.test.ts	per-source filing-rules resolution	3	readFileSync
 test/fix-wave-structural.test.ts	#2084 — cli.ts owns process-exit teardown via finishCliTeardown	4	readFileSync
 test/fix-wave-structural.test.ts	#2955 — sync multi-source repoPath routes through msysToNativePath	1	readFileSync
@@ -220,6 +225,7 @@ test/scripts/run-verify-parallel.test.ts	guard registration ⇒ execution covera
 test/scripts/test-shard.slow.test.ts	test-shard.sh — LPT balance contract	5	readFileSync
 test/serve-http-github-webhook.test.ts	handler wiring (source pin)	1	readFileSync
 test/serve-http-mcp-transport-cleanup.test.ts	POST /mcp transport cleanup (#2844)	2	readFileSync
+test/serve-http-metrics.test.ts	serve-http.ts wiring (structural — the two defects of the original PR)	2	readFileSync
 test/serve-stdin-eof-drain.test.ts	serve-sync-runner stays off the boot path (#4409)	1	readFileSync
 test/skillify-scaffold.test.ts	11-item scaffold contract (T9 + Phase 3 cross-modal eval)	1	readFileSync
 test/skillify-scaffold.test.ts	applyScaffold	3	readFileSync

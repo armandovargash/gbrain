@@ -4473,9 +4473,10 @@ See also:
     // gbrain-sync:default — absent — printed "nothing to break", exit 0, and
     // left the dead holder's row on gbrain-sync:<src>; the follow-up sync
     // then refused for the 60s takeover grace. Resolve the SAME source the
-    // sync would lock.
+    // sync would lock. Explicit --source keeps the resolver-free path (no
+    // assertSourceExists) so leftover locks of deleted sources stay breakable.
     const { resolveSourceWithTier: resolveBreakSource } = await import('../core/source-resolver.ts');
-    const sourceId = (await resolveBreakSource(engine, sourceArg || null)).source_id;
+    const sourceId = sourceArg ?? (await resolveBreakSource(engine, null)).source_id;
     const lockKey = `gbrain-sync:${sourceId}`;
     const exit = await runBreakLock(engine, lockKey, sourceId, {
       force: forceBreakLock,

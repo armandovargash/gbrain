@@ -2345,7 +2345,10 @@ async function handleCliOnly(command: string, args: string[]) {
       // teardown are a pre-existing class, tracked as a TODOS.md follow-up.
       let eng: BrainEngine | null = null;
       try {
-        eng = await connectEngine();
+        // #4364: --no-migrate keeps doctor observational — probeOnly skips
+        // connectEngine's auto-migrate block so a clean/behind DB is reported
+        // on as-is instead of being migrated before the health checks run.
+        eng = await connectEngine({ probeOnly: args.includes('--no-migrate') });
         await runDoctor(eng, args);
       } catch (e) {
         // DB unavailable OR the DB-backed run threw — still run filesystem
@@ -3649,9 +3652,9 @@ async function connectEngine(opts?: { probeOnly?: boolean }): Promise<BrainEngin
       // host brain's merge.
       MERGED_CONFIG_BY_ENGINE.set(engine, merged);
       // Stash gate flags on process.env for downstream readers (import-file.ts
-      // dispatches on GBRAIN_EMBEDDING_MULTIMODAL, OCR consumer reads
-      // GBRAIN_EMBEDDING_IMAGE_OCR_*). The gateway itself doesn't read these
-      // flags; this preserves the contract without changing the gateway shape.
+      // dispatches on GBRAIN_EMBEDDING_MULTIMODAL, gates OCR on GBRAIN_EMBEDDING_IMAGE_OCR).
+      // The OCR *model* reaches the gateway via the re-configure below (#4107); its
+      // env stash stays so subprocesses re-fold it through loadConfig's env merge.
       if (merged.embedding_multimodal !== undefined) {
         process.env.GBRAIN_EMBEDDING_MULTIMODAL = String(merged.embedding_multimodal);
       }

@@ -2,7 +2,7 @@
 
 All notable changes to GBrain will be documented in this file.
 
-## [0.46.35.0] - 2026-08-27
+## [0.46.36.0] - 2026-08-27
 
 Optional Memorable integration, adopted from community PR #4537 (thank you
 @NIkhil-cmd-cmd) and hardened end-to-end: your agent sessions can now feed
@@ -66,7 +66,7 @@ until a human accepts an explicit disclosure.
   discovered-by-recency transcript (which can belong to a different, still
   running session) is captured locally but never relayed.
 
-### To take advantage of v0.46.35.0
+### To take advantage of v0.46.36.0
 ```bash
 gbrain upgrade            # no schema migration — new files + hooks only
 npm i -g memorable-cli    # the third-party CLI (optional; closed source)
@@ -78,6 +78,53 @@ Nothing activates without the disclosure step — installs that skip it are
 byte-for-byte unaffected. Read `docs/memorable-agents.md` first: it states
 plainly what leaves the machine, that the CLI is closed source, and how to
 purge every local artifact after disabling.
+
+## [0.46.35.0] - 2026-08-27
+
+**The maintainer train: 31 red-proven fixes, every one adversarially verified.**
+Wave K's second train, retargeted onto the merged community train (v0.46.32.0):
+5 fixes salvaged from the stale fix-wave-j PR (#4363), 16 newly verified open
+issues fixed, and 10 community PRs reimplemented with credit where the direction
+was right but the code had rotted. Every fix carries a regression test proven
+RED at its base commit before the fix (captured evidence, not assertion) and
+passed an independent fresh-context review — 32/32 approved, zero rejections
+(6 fixes were later superseded by the wave-g reconciliation and yielded to
+master's versions during retarget).
+
+### Behavior changes
+- **`gbrain config get` now redacts secrets by default** (matching `show`/`set`);
+  pass `--raw` (either position) for automation that needs the plain value.
+  Salvaged from #4363, fixes #3943. See `skills/migrations/v0.46.35.0.md`.
+- `runUpgrade` now FAILS (exit 1, remediation recorded) when a self-upgrade
+  leaves the resolved version below the fetched target, instead of reporting
+  false success (#4366).
+- Migration **v143** adds `dream_verdicts_ttl` (#4069, reimplemented from
+  @avs-io's PR).
+
+### Fixed (highlights — full list in the PR body)
+- BudgetTracker admits concurrent reservations against cumulative + outstanding
+  spend, closing the N-way `--max-cost-usd` breach race (#4365).
+- Judge parse failures retry next cycle instead of minting durable cached
+  `unresolvable` verdicts (#3910); `abandoned_threads` accepts month-precision
+  `since:` dates (#4041); `embedding_image_ocr_model` is honored end-to-end
+  (#4107); fallback-slugified facts can no longer mint canonical stub pages —
+  `FenceTarget.resolutionSource` is now required (#4108).
+- think: max_tokens truncation is labeled `LLM_OUTPUT_TRUNCATED` with 16K
+  output headroom for the Anthropic 4-x family (#4375); inline citations
+  always parse with a warning on mismatch (#4376).
+- Search: backlink counts key on page identity, not colliding bare slugs
+  (#4380); OpenAI-compatible local embedding endpoints honor OPENAI_BASE_URL
+  without demanding a real OpenAI key (#4385).
+- Transcripts ingest strips NULs at the render boundary instead of aborting
+  the run (#4392); `--pending` counts exclude audit checkpoint rows (#4394);
+  break-lock resolves its target source correctly under serve delegation, and
+  explicit `--source` can still break a deleted source's leftover lock (#4412);
+  schema lint resolves extends-inherited page types on the MCP op (#4373);
+  `apply-migrations --list/--dry-run` print the DB probe state with a
+  `--require-db` gate (#4364).
+- Reimplemented-with-credit fixes across dream/search/sync/cli/facts from PRs
+  #3478 #3622 #3753 #3815 #3851 #3893 #3904 #3908 #4011 #4022 #4023 #4069
+  #4077 #4109 #4255 — each author credited in the commit trailers.
 
 ## [0.46.34.0] - 2026-08-26
 
