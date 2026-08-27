@@ -42,10 +42,10 @@ Three of the knobs deserve a sentence:
   no-op for non-relational queries. The `query` op's `relational` flag
   forces it on/off per call.
 - **`keywordOrFallback`** (on in every mode; config key
-  `search.keywordOrFallback`) relaxes the keyword arm from AND to OR when
-  strict AND matching finds nothing, so a multi-word query still gets
-  keyword recall instead of leaning on vectors alone. Set the config key to
-  `false` to keep strict AND matching.
+  `search.keywordOrFallback`) relaxes the keyword and title arms from AND
+  to OR when strict AND matching finds nothing, so a multi-word query still
+  gets keyword recall instead of leaning on vectors alone. Set the config
+  key to `false` to keep strict AND matching.
 
 ### Setting and resolving the mode
 

@@ -29,8 +29,8 @@ The `takes.embedding` column follows your configured embedding dimension
 (migration v142): if the configured model's width differs from the column,
 the migration resizes it and clears every existing take vector by design —
 run `gbrain takes embed` once after upgrading to repopulate them. Until you
-do, `think` and `takes search --semantic` fall back to keyword-only takes
-retrieval.
+do, `think` falls back to keyword-only takes retrieval and
+`takes search --semantic` simply reports no semantic matches.
 
 ## Facts (hot memory — `facts` table, v0.31)
 
