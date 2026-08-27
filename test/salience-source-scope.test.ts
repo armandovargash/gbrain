@@ -186,6 +186,44 @@ describe('find_contradictions source scoping', () => {
     expect(touchesPrivate(res)).toBe(false);
   });
 
+  test('limit under-fill: fences run BEFORE the limit cutoff — droppable findings ahead of a visible one cannot starve it', async () => {
+    // A later run whose report orders a private-endpoint finding and a
+    // cross-boundary finding BEFORE the only visible finding. With limit=1,
+    // filtering AFTER the cutoff would keep the private finding (it IS in
+    // scope), hit the limit, then drop it in the visibility pass — returning
+    // 0 while total_in_run claims completeness. The fences must instead
+    // verify before counting, so the visible finding still surfaces.
+    const finding = (aSlug: string, bSlug: string) => ({
+      kind: 'direct', severity: 'high', axis: 'fact', confidence: 0.9,
+      a: { slug: aSlug, chunk_id: null, take_id: null },
+      b: { slug: bSlug, chunk_id: null, take_id: null },
+      resolution_kind: 'manual', resolution_command: '',
+    });
+    await engine.writeContradictionsRun({
+      run_id: 'fixture-run-underfill', judge_model: 'test', prompt_version: 'v1',
+      queries_evaluated: 3, queries_with_contradiction: 3, total_contradictions_flagged: 3,
+      wilson_ci_lower: 0, wilson_ci_upper: 1, judge_errors_total: 0,
+      cost_usd_total: 0, duration_ms: 1,
+      source_tier_breakdown: {},
+      report_json: {
+        per_query: [{
+          contradictions: [
+            finding('alpha/one', 'alpha/private-note'), // in scope, private — dropped by visibility
+            finding('alpha/one', 'beta/secret-one'),    // cross-boundary — dropped by scope
+            finding('alpha/one', 'alpha/two'),          // the visible finding, ordered LAST
+          ],
+        }],
+      },
+    });
+    const res = await find_contradictions.handler(ctxOf({ sourceId: 'alpha' }), { limit: 1 }) as {
+      contradictions: Array<{ a: { slug: string }; b: { slug: string } }>; total_in_run: number;
+    };
+    expect(res.contradictions.length).toBe(1);
+    expect(res.contradictions[0].a.slug).toBe('alpha/one');
+    expect(res.contradictions[0].b.slug).toBe('alpha/two');
+    expect(touchesPrivate(res)).toBe(false);
+  });
+
   test('#4352: a visibility:private endpoint hides the finding from remote scoped callers; trusted local keeps it', async () => {
     // Remote scalar caller scoped to alpha: the private-endpoint finding is
     // IN scope (both pages exist in alpha) — the world-visibility keep-list

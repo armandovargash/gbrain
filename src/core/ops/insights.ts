@@ -252,8 +252,22 @@ const find_contradictions: Operation = {
     // is the follow-up that closes this.
     const scope = sourceScopeOpts(ctx);
     const scoped = scope.sourceId !== undefined || scope.sourceIds !== undefined;
+    // #4352 posture, same keep-list idiom as get_recent_salience
+    // (ops/salience.ts): a `visibility: private` endpoint must not leak to a
+    // remote caller through the contradictions surface. Fail-closed: a
+    // finding survives only when BOTH endpoint slugs have a world-visible
+    // page row inside the caller's scope. Trusted local + the operator
+    // opt-outs resolve to "expose" inside resolveExcludePrivatePages.
+    const excludePrivate = await resolveExcludePrivatePages(ctx.engine, ctx.remote);
     let kept: typeof allFindings;
-    if (scoped) {
+    if (!scoped && !excludePrivate) {
+      kept = matching.slice(0, limit);
+    } else {
+      // Both fences run BEFORE a finding counts toward `limit` — filtering
+      // after the cutoff would silently under-fill the response (findings
+      // past the break point were never examined) while total_in_run claims
+      // completeness. Batched so the world-visibility keep-list probe stays
+      // one query per batch rather than per finding.
       const cache = new Map<string, boolean>();
       const inScope = async (slug: string): Promise<boolean> => {
         const hit = cache.get(slug);
@@ -263,23 +277,25 @@ const find_contradictions: Operation = {
         return ok;
       };
       kept = [];
-      for (const f of matching) {
-        if (kept.length >= limit) break;
-        if ((await inScope(f.a.slug)) && (await inScope(f.b.slug))) kept.push(f);
+      const BATCH = 25;
+      for (let i = 0; i < matching.length && kept.length < limit; i += BATCH) {
+        const batch = matching.slice(i, i + BATCH);
+        const scopeOk: typeof allFindings = [];
+        for (const f of batch) {
+          if (kept.length + scopeOk.length >= limit + BATCH) break;
+          if (!scoped || ((await inScope(f.a.slug)) && (await inScope(f.b.slug)))) scopeOk.push(f);
+        }
+        let visibleOk = scopeOk;
+        if (excludePrivate && scopeOk.length > 0) {
+          const endpointSlugs = [...new Set(scopeOk.flatMap((f) => [f.a.slug, f.b.slug]))];
+          const worldVisible = await findWorldVisibleSlugs(ctx.engine, endpointSlugs, scope);
+          visibleOk = scopeOk.filter((f) => worldVisible.has(f.a.slug) && worldVisible.has(f.b.slug));
+        }
+        for (const f of visibleOk) {
+          if (kept.length >= limit) break;
+          kept.push(f);
+        }
       }
-    } else {
-      kept = matching.slice(0, limit);
-    }
-    // #4352 posture, same keep-list idiom as get_recent_salience
-    // (ops/salience.ts): a `visibility: private` endpoint must not leak to a
-    // remote caller through the contradictions surface. Fail-closed: a
-    // finding survives only when BOTH endpoint slugs have a world-visible
-    // page row inside the caller's scope. Trusted local + the operator
-    // opt-outs resolve to "expose" inside resolveExcludePrivatePages.
-    if (kept.length > 0 && await resolveExcludePrivatePages(ctx.engine, ctx.remote)) {
-      const endpointSlugs = [...new Set(kept.flatMap((f) => [f.a.slug, f.b.slug]))];
-      const worldVisible = await findWorldVisibleSlugs(ctx.engine, endpointSlugs, scope);
-      kept = kept.filter((f) => worldVisible.has(f.a.slug) && worldVisible.has(f.b.slug));
     }
     return {
       run_id: latest.run_id,
