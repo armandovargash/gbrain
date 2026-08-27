@@ -141,23 +141,32 @@ describe('claude-code lane (session-end hook)', () => {
     expect(body).toContain('record --session sess-live');
 
     // Resume with IDENTICAL content: no new receipt, no second spawn.
+    // Negative-spawn window: the first child's marker line is already durably
+    // present (pollMarker above), so a buggy second spawn only needs its own
+    // detached child to run `echo >> marker` — give that a full second under
+    // loaded-runner jitter before asserting the count stayed at 1. The
+    // receipt assertion is timing-free (dedup happens synchronously).
     await runHook(['session-end'], { stdin, write: sink().write, transcriptRoot, spawnPush: () => {} });
-    await new Promise((r) => setTimeout(r, 250));
     expect(await readSessionReceiptsTail(10)).toHaveLength(1);
+    await new Promise((r) => setTimeout(r, 1000));
     expect(readFileSync(marker, 'utf8').trim().split('\n').filter(Boolean)).toHaveLength(1);
   });
 
   test('fire-and-forget: the hook returns while a slow child is still running', async () => {
     await optInFully();
-    const { marker } = stubRelay({ sleepSec: 2 });
+    // 6s child vs a 4s wall-clock bound: the gap absorbs loaded-CI-runner
+    // jitter (fs, module imports, mkdtemp on shared runners) while still
+    // proving the hook did not wait the child out. The marker-absent check at
+    // return is the mechanism proof; the elapsed bound is the backstop.
+    const { marker } = stubRelay({ sleepSec: 6 });
     const { stdin, transcriptRoot } = claudeSetup('sess-slow');
     const t0 = Date.now();
     await runHook(['session-end'], { stdin, write: sink().write, transcriptRoot, spawnPush: () => {} });
     const elapsed = Date.now() - t0;
-    expect(elapsed).toBeLessThan(1500); // did not wait out the 2s child
+    expect(elapsed).toBeLessThan(4000); // did not wait out the 6s child
     expect(existsSync(marker)).toBe(false); // child still sleeping at return
-    expect((await pollMarker(marker, 1)).length).toBeGreaterThan(0); // …but it does finish
-  });
+    expect((await pollMarker(marker, 1, 10_000)).length).toBeGreaterThan(0); // …but it does finish
+  }, 20_000);
 
   test('enabled flag without the disclosure stamp (out-of-band write): no receipt, no spawn', async () => {
     writeGate(true); // the `memorable enable` b2() state — no stamp
