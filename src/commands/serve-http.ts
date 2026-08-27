@@ -1055,7 +1055,10 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
     max: 10,
     standardHeaders: true,
     legacyHeaders: false,
-    message: 'Too many magic-link attempts. Wait a minute before trying again.',
+    // Object message → express-rate-limit serializes it as JSON, matching the
+    // other /admin routes. Neutral wording: the bucket is shared across
+    // /admin/login, /admin/api/issue-magic-link, AND /admin/auth/:token.
+    message: { error: 'rate_limited', message: 'Too many admin auth attempts. Try again shortly.' },
   });
 
   app.post('/token', ccRateLimiter, express.urlencoded({ extended: false }), async (req, res, next) => {

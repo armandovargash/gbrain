@@ -7951,3 +7951,44 @@ covers DEAD logs; go-forward capture beyond Claude Code is deliberately absent.
   doctor's non-fallback DB errors mid-run, extract/import bulk loops, jobs
   work loop). Sweep the catch sites, route message text through the
   redactors, and emit the marker where `isDbAccessFailure` says so. Effort: M.
+
+## Test-gap-wave ship-review residuals (filed at ship time; each verified real, deferred with rationale)
+
+- [ ] **P2 — chronicle diary redaction: WHERE-level exclusion for remote callers.**
+  The fail-closed redaction filters AFTER the SQL LIMIT, so a remote caller's
+  chronicle_day/since/on_this_day response can under-fill (empty day view when
+  diary rows saturate the limit) and the row-count deficit is a countable
+  oracle for diary VOLUME in the window; chronicle_last_seen answers the
+  never-seen shape when the LATEST sighting is diary-sourced instead of
+  degrading to the most recent non-diary sighting. Push the diary exclusion
+  into the WHERE clause for remote callers in BOTH engines (the epScope
+  threading pattern) so the limit applies to visible rows and last_seen
+  degrades gracefully. Files: src/core/ops/chronicle.ts, both engines'
+  chronicle read queries, test/chronicle-ops-scope.test.ts. Effort: M.
+- [ ] **P2 — selected-e2e PR-lane sizing for version-bump PRs.** The
+  fail-closed selector treats package.json/bun.lock changes as run-ALL, so
+  every /ship PR (version bump) pays the full e2e glob on one runner against
+  a 60-min ceiling. Consider: version-only package.json diffs classify as
+  doc-like, or shard the full-glob fallback. Constraint: select-e2e's
+  --classify-only exit semantics are load-bearing (coverage-diff-gate) — a
+  selector semantics change needs its own review. Files:
+  scripts/select-e2e.ts, .github/workflows/e2e.yml. Effort: M.
+- [ ] **P3 — PACK_NOT_FOUND echoes the resolved baseDir.** Pre-existing
+  (deliberately not expanded by the INVALID_PACK_NAME work): the error
+  message embeds the absolute schema-packs path and rides verbatim to remote
+  admin callers via schema_apply_mutations' envelope. Redact to the pack name
+  only, or gate the path to trusted local. Files:
+  src/core/schema-pack/mutate.ts. Effort: S.
+- [ ] **P3 — find_contradictions probe reports lack endpoint source
+  attribution.** The scope pass checks slug existence within scope; findings
+  carry no source_id, so a same-slug page in another source can satisfy the
+  check (caveat documented at the check site). Record source_id per endpoint
+  in the probe report_json and filter on it. Files:
+  src/core/eval/contradictions*, src/core/ops/insights.ts. Effort: M.
+- [ ] **P3 — consolidate copy-pasted test harnesses.** Five near-identical
+  in-process CLI runners (cache-cli/remote-cli/github-source-demo/connect/
+  quarantine-cli), four in-process OAuth+MCP fixture servers (remote-cli/
+  mcp-client/doctor-remote.serial/init-mcp-only), three subagent auto-cancel
+  polling harnesses (dream-quota-degradation/cycle-synthesize-daily-cap/
+  e2e dream-synthesize-chunking), six exit-verdict restore blocks in
+  sync-delegate-ladder. Extract shared test/helpers modules. Effort: M.

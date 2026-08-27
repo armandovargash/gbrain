@@ -17,7 +17,11 @@ import {
   FIND_CONTRADICTIONS_DESCRIPTION,
   FIND_TRAJECTORY_DESCRIPTION,
 } from '../operations-descriptions.ts';
-import { dropPrivateOnlyRows } from '../search/private-visibility.ts';
+import {
+  dropPrivateOnlyRows,
+  findWorldVisibleSlugs,
+  resolveExcludePrivatePages,
+} from '../search/private-visibility.ts';
 
 // --- v0.43 (#2095): push-based context — the brain volunteers pages ---
 
@@ -222,29 +226,12 @@ const find_contradictions: Operation = {
       }>;
     }> | undefined) ?? [];
     const allFindings = perQuery.flatMap((q) => q.contradictions);
-    // Source isolation (fail-closed): the probe report is brain-wide, so a
-    // scoped caller sees a finding only when BOTH endpoints resolve inside
-    // their source scope. Existence is checked with a SCOPED getPage (per-slug
-    // cache; findings are bounded by the report size). An unscoped trusted
-    // local caller ({} scope) keeps the brain-wide view.
-    const scope = sourceScopeOpts(ctx);
-    let findings = allFindings;
-    if (scope.sourceId !== undefined || scope.sourceIds !== undefined) {
-      const cache = new Map<string, boolean>();
-      const inScope = async (slug: string): Promise<boolean> => {
-        const hit = cache.get(slug);
-        if (hit !== undefined) return hit;
-        const ok = (await ctx.engine.getPage(slug, scope)) !== null;
-        cache.set(slug, ok);
-        return ok;
-      };
-      const kept: typeof allFindings = [];
-      for (const f of allFindings) {
-        if ((await inScope(f.a.slug)) && (await inScope(f.b.slug))) kept.push(f);
-      }
-      findings = kept;
-    }
-    const filtered = findings.filter((f) => {
+    // Cheap in-memory filters (severity/slug) run FIRST, so the scoped
+    // existence probes below only pay for findings that could actually be
+    // returned. Pre-fix, every finding in the report paid a sequential
+    // scoped getPage probe BEFORE the filters/slice — the deprecated
+    // getPage-per-row N+1 class.
+    const matching = allFindings.filter((f) => {
       if (sevFilter && f.severity !== sevFilter) return false;
       if (slugFilter) {
         const sA = f.a.slug.toLowerCase();
@@ -253,11 +240,58 @@ const find_contradictions: Operation = {
       }
       return true;
     });
+    // Source isolation (fail-closed): the probe report is brain-wide, so a
+    // scoped caller sees a finding only when BOTH endpoints resolve inside
+    // their source scope. Existence is checked with a SCOPED getPage
+    // (per-call slug cache), early-exiting once `limit` findings are kept.
+    // An unscoped trusted local caller ({} scope) keeps the brain-wide view.
+    // KNOWN CAVEAT (slug collision): the scope check is slug-EXISTENCE within
+    // scope — findings carry no source attribution, so a finding about
+    // source B's page stays visible to a source-A caller whenever source A
+    // holds a page with the SAME slug. Recording source_id on the probe side
+    // is the follow-up that closes this.
+    const scope = sourceScopeOpts(ctx);
+    const scoped = scope.sourceId !== undefined || scope.sourceIds !== undefined;
+    let kept: typeof allFindings;
+    if (scoped) {
+      const cache = new Map<string, boolean>();
+      const inScope = async (slug: string): Promise<boolean> => {
+        const hit = cache.get(slug);
+        if (hit !== undefined) return hit;
+        const ok = (await ctx.engine.getPage(slug, scope)) !== null;
+        cache.set(slug, ok);
+        return ok;
+      };
+      kept = [];
+      for (const f of matching) {
+        if (kept.length >= limit) break;
+        if ((await inScope(f.a.slug)) && (await inScope(f.b.slug))) kept.push(f);
+      }
+    } else {
+      kept = matching.slice(0, limit);
+    }
+    // #4352 posture, same keep-list idiom as get_recent_salience
+    // (ops/salience.ts): a `visibility: private` endpoint must not leak to a
+    // remote caller through the contradictions surface. Fail-closed: a
+    // finding survives only when BOTH endpoint slugs have a world-visible
+    // page row inside the caller's scope. Trusted local + the operator
+    // opt-outs resolve to "expose" inside resolveExcludePrivatePages.
+    if (kept.length > 0 && await resolveExcludePrivatePages(ctx.engine, ctx.remote)) {
+      const endpointSlugs = [...new Set(kept.flatMap((f) => [f.a.slug, f.b.slug]))];
+      const worldVisible = await findWorldVisibleSlugs(ctx.engine, endpointSlugs, scope);
+      kept = kept.filter((f) => worldVisible.has(f.a.slug) && worldVisible.has(f.b.slug));
+    }
     return {
       run_id: latest.run_id,
       ran_at: latest.ran_at,
-      contradictions: filtered.slice(0, limit),
-      total_in_run: findings.length,
+      contradictions: kept,
+      // Trusted local unscoped callers keep the exact pre-fix semantics
+      // (every finding in the run). Scoped/remote callers get the count of
+      // findings actually verified visible to them — the full scoped count
+      // would require paying the per-slug probe for every finding (the N+1
+      // this handler no longer does), and a larger-than-returned count is a
+      // hidden-finding oracle for privacy-filtered callers.
+      total_in_run: scoped || ctx.remote !== false ? kept.length : allFindings.length,
     };
   },
   cliHints: { name: 'find-contradictions' },

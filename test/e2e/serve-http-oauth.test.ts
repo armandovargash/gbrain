@@ -1523,7 +1523,10 @@ describeE2E('serve-http OAuth 2.1 E2E (v0.26.1 + v0.26.2 + v0.26.3)', () => {
     // standardHeaders: true → draft RateLimit headers carry the max (10).
     expect(limited!.headers.get('ratelimit-limit')).toBe('10');
 
-    // Body is the limiter's configured message.
-    expect(await limited!.text()).toContain('Too many magic-link attempts');
+    // Body is the limiter's configured JSON envelope (object message →
+    // express-rate-limit serializes it as JSON, matching the /admin routes).
+    const limitedBody = JSON.parse(await limited!.text()) as { error: string; message: string };
+    expect(limitedBody.error).toBe('rate_limited');
+    expect(limitedBody.message).toContain('Too many admin auth attempts');
   }, 60_000);
 });

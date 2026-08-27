@@ -98,6 +98,7 @@ test/e2e/multimodal-postgres.test.ts
 test/e2e/non-tty-output.serial.test.ts
 test/e2e/onboard-full-flow.test.ts
 test/e2e/openclaw-reference-compat.test.ts
+test/e2e/openrouter-anthropic-subagent-replay.live.test.ts
 test/e2e/orphan-reduction.test.ts
 test/e2e/pgbouncer-teardown.test.ts
 test/e2e/pglite-cli-exit.serial.test.ts
@@ -152,8 +153,6 @@ test/e2e/v0_29-mcp-dispatch-pglite.test.ts
 test/e2e/v0_30_3-fix-wave.test.ts
 test/e2e/vector-ef-search-postgres.test.ts
 test/e2e/volunteer-context-postgres.test.ts
-test/e2e/voyage-multimodal.test.ts
-test/e2e/voyage-rerank-live.test.ts
 test/e2e/whoknows.test.ts
 test/e2e/worker-lock-renewal-starvation.test.ts
 test/e2e/workspace-generic-compat.test.ts

@@ -2,8 +2,8 @@
 // generate-corpus.mjs — deterministic corpus builder for the takes-bootstrap
 // classifier eval (test-gap plan H1 / TODOS TODO-E).
 //
-// 40 hand-authored archetype cases × 3 label-invariant surface variants
-// (name/company/metric substitution from placeholder pools) = 120 cases.
+// 41 hand-authored archetype cases × 3 label-invariant surface variants
+// (name/company/metric substitution from placeholder pools) = 123 cases.
 // Substitution preserves labels by construction: expectations are templated
 // with the same placeholders as the bodies, so a variant never changes what
 // should be extracted — only the surface strings. Deterministic (no
@@ -179,7 +179,7 @@ const ARCHETYPES = [
     forbid: ['^(?!.*(landing|blockquote|their)).*best in class'],
     notes: 'extract the holder view, not the quoted marketing copy' },
 
-  // ── extra coverage to reach 40 archetypes ────────────────────────────────
+  // ── extra coverage to reach 41 archetypes ────────────────────────────────
   { id: 'take-team', category: 'take', type: 'company', title: '{Cn} team read',
     body: 'The {Cn} founding team argues well with each other — I consider that a leading indicator of resilience.',
     expected: [exp('leading indicator|resilience', 'take', 0.3, 1)], notes: 'team-quality opinion' },

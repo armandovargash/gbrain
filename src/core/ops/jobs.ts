@@ -87,7 +87,25 @@ const submit_job: Operation = {
   scope: 'admin',
   handler: async (ctx, p) => {
     const name = typeof p.name === 'string' ? p.name.trim() : '';
-    const jobData = (p.data as Record<string, unknown>) || {};
+    const jobData = { ...((p.data as Record<string, unknown>) || {}) };
+    // Derived-identity fence for `data.client_id` (same posture as
+    // send_job_message's sender fence): it is a spend-attribution identity —
+    // handlers settle LLM/embedding spend against it via getJobClientId →
+    // recordMinionJobSpend (minion-spend.ts), charging that OAuth client's
+    // mcp_spend_log / daily cap. A remote caller must NEVER pick it
+    // (spoofing another client's bill/cap): overwrite with the
+    // AUTHENTICATED client id — the same identity source run_onboard's A23
+    // stamping uses — or strip the key when no authenticated identity
+    // exists (spend then records clientId=null, global accounting only).
+    // Trusted local callers (ctx.remote === false) pass through unchanged.
+    if (ctx.remote !== false) {
+      const authClientId = ctx.auth?.clientId;
+      if (typeof authClientId === 'string' && authClientId.length > 0) {
+        jobData.client_id = authClientId;
+      } else {
+        delete jobData.client_id;
+      }
+    }
     const translateAdmissionError = (e: unknown): never => {
       if (e instanceof InvalidEmbedBackfillSourceIdError) {
         throw new OperationError('invalid_params', e.message);

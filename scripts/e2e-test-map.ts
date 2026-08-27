@@ -52,7 +52,7 @@ export const E2E_TEST_MAP: Record<string, string[]> = {
   // dream.ts is a thin alias over runCycle in cycle.ts.
   "src/core/cycle.ts": ["test/e2e/cycle.test.ts", "test/e2e/dream.test.ts"],
   // Multi-source sync writes share the per-source bookmark anchor.
-  "src/core/sync.ts": ["test/e2e/sync.test.ts", "test/e2e/multi-source.test.ts"],
+  "src/core/sync.ts": ["test/e2e/sync.test.ts", "test/e2e/multi-source.test.ts", "test/e2e/sync-reconcile-postgres.test.ts"],
   // F7: real SIGKILL mid-sync on live Postgres — checkpoint banking
   // (op_checkpoint_paths), the frozen last_commit bookmark, stranded-lock
   // reclaim via TTL + steal grace, and exactly-once convergence on resume.
@@ -106,7 +106,17 @@ export const E2E_TEST_MAP: Record<string, string[]> = {
     "test/e2e/minions-shell.test.ts",
     "test/e2e/minions-shell-pglite.test.ts",
     "test/e2e/worker-abort-recovery.test.ts",
+    "test/e2e/connector-sync-handler-pglite.test.ts",
   ],
+  // v0.46.31.0 chat-connectors wave (mapped at the test-gap-wave merge —
+  // these arrived unclaimed): connector classify/sync core + doctor check.
+  "src/core/connectors/**": [
+    "test/e2e/connector-sync-handler-pglite.test.ts",
+    "test/e2e/connectors-sync-pglite.test.ts",
+    "test/e2e/doctor-connectors-pglite.test.ts",
+  ],
+  // Agent-job scope fences over real Postgres.
+  "src/core/ops/jobs.ts": ["test/e2e/jobs-agent-scope-postgres.test.ts"],
   // postgres.js bind paths + JSONB shapes + parity vs PGLite.
   "src/core/postgres-engine.ts": [
     "test/e2e/postgres-bootstrap.test.ts",
@@ -142,6 +152,9 @@ export const E2E_TEST_MAP: Record<string, string[]> = {
     "test/e2e/engine-parity.test.ts",
     "test/e2e/schema-drift.test.ts",
     "test/e2e/health-parity-postgres.test.ts",
+    // master's own remote-privacy sweep suite for the scoped salience arms
+    // (mapped at the test-gap-wave merge — arrived unclaimed).
+    "test/e2e/salience-anomalies-source-isolation-pglite.test.ts",
   ],
   // The CJK keyword branch exists ONLY in the PGLite engine (ILIKE +
   // term-frequency); Postgres has none. The cross-engine asymmetry is a

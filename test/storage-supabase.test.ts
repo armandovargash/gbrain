@@ -189,6 +189,45 @@ describe('SupabaseStorage upload routing (100 MB TUS threshold)', () => {
     expect(hdrs(retry)['Content-Length']).toBe(String(TUS_CHUNK_SIZE));
     expect((retry.init.body as Uint8Array)[0]).toBe(0xab); // bytes re-windowed from serverOffset
   }, 10_000); // the retry path sleeps a real 1s backoff before the HEAD
+
+  test('standard POST non-ok status throws with the status in the message', async () => {
+    const { impl, calls } = stubFetch([() => resp(413)]);
+    const storage = new SupabaseStorage(CONFIG, impl);
+    await expect(storage.upload('notes/a.txt', Buffer.from('hello'), 'text/plain'))
+      .rejects.toThrow('Supabase upload failed: 413');
+    expect(calls.length).toBe(1); // no retry on the standard arm
+  });
+
+  test('TUS create-session failure throws: non-ok status, and ok-but-no-Location', async () => {
+    // Non-ok create → the status-carrying throw, and NO chunk PATCH follows.
+    const nonOk = stubFetch([() => resp(403)]);
+    await expect(new SupabaseStorage(CONFIG, nonOk.impl).upload('big.bin', Buffer.alloc(TUS_THRESHOLD)))
+      .rejects.toThrow('TUS create failed: 403');
+    expect(nonOk.calls.length).toBe(1);
+    // Ok create with a missing Location header → the documented throw.
+    const noLocation = stubFetch([() => resp(201)]);
+    await expect(new SupabaseStorage(CONFIG, noLocation.impl).upload('big.bin', Buffer.alloc(TUS_THRESHOLD)))
+      .rejects.toThrow('TUS create did not return Location header');
+    expect(noLocation.calls.length).toBe(1);
+  });
+
+  test('three consecutive PATCH failures exhaust the retries and throw', async () => {
+    const uploadUrl = `${PROJECT_URL}/storage/v1/upload/resumable/session-3`;
+    const { impl, calls } = stubFetch([
+      () => resp(201, { Location: uploadUrl }),                 // create
+      () => resp(500),                                          // PATCH #1 fails
+      () => resp(200, { 'Upload-Offset': '0' }),                // HEAD before retry #1
+      () => resp(500),                                          // PATCH #2 fails
+      () => resp(200, { 'Upload-Offset': '0' }),                // HEAD before retry #2
+      () => resp(500),                                          // PATCH #3 fails → maxAttempts (3) exhausted
+    ]);
+    const storage = new SupabaseStorage(CONFIG, impl);
+    await expect(storage.upload('big.bin', Buffer.alloc(TUS_THRESHOLD)))
+      .rejects.toThrow('TUS PATCH failed: 500');
+    // Exactly maxAttempts (3) PATCHes were sent — no fourth attempt.
+    expect(calls.length).toBe(6);
+    expect(calls.filter(c => c.init.method === 'PATCH').length).toBe(3);
+  }, 15_000); // the retry loop sleeps real 1s + 2s backoffs between attempts
 });
 
 describe('SupabaseStorage delete', () => {

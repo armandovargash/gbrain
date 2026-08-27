@@ -180,8 +180,13 @@ const UNCOVERED: string[] = [
   'connectors_status',
 ];
 
-/** The seeded literal length of UNCOVERED. NEVER raise this number. */
-const UNCOVERED_SEEDED_LENGTH = 8;
+/**
+ * The CURRENT length of UNCOVERED. NEVER raise this number; when UNCOVERED
+ * shrinks, lower this constant IN THE SAME COMMIT (the module-size ratchet's
+ * no-stale-slack convention) so no silent slack accumulates for future
+ * entries to hide in.
+ */
+const UNCOVERED_SEEDED_LENGTH = 2;
 
 describe('operations coverage ledger', () => {
   const opNames = allOperations().map(op => op.name);

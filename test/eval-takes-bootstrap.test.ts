@@ -16,7 +16,7 @@
  * GRADUATES (TODO-E) — this file guards the instrument, not the score.
  */
 import { describe, test, expect } from 'bun:test';
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { scoreCorpus, GRADUATION, type CorpusCase } from '../evals/takes-bootstrap/scorer.ts';
@@ -56,11 +56,21 @@ describe('corpus integrity', () => {
   });
 
   test('committed corpus is regenerator-fresh (deterministic builder)', () => {
-    const out = execFileSync('node', ['evals/takes-bootstrap/generate-corpus.mjs'], { cwd: repoRoot, encoding: 'utf8' });
-    expect(out).toContain('wrote');
-    const regenerated = readFileSync(corpusPath, 'utf8').trim().split('\n');
-    expect(regenerated.length).toBe(corpus.length);
-    expect(JSON.parse(regenerated[0]).id).toBe(corpus[0].id);
+    // Read the committed bytes FIRST, regenerate in place, then demand FULL
+    // byte equality — a drifted generator (or hand-edited corpus) fails here,
+    // not just a changed line count or first id. The finally block restores
+    // the committed bytes on failure so a red run never leaves the tree dirty.
+    const committed = readFileSync(corpusPath, 'utf8');
+    try {
+      const out = execFileSync('node', ['evals/takes-bootstrap/generate-corpus.mjs'], { cwd: repoRoot, encoding: 'utf8' });
+      expect(out).toContain('wrote');
+      const regenerated = readFileSync(corpusPath, 'utf8');
+      expect(regenerated).toBe(committed);
+    } finally {
+      if (readFileSync(corpusPath, 'utf8') !== committed) {
+        writeFileSync(corpusPath, committed);
+      }
+    }
   });
 
   test('privacy: placeholder identities only', () => {

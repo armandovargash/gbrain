@@ -43,8 +43,14 @@ function ctxOf(overrides: Partial<OperationContext> = {}): OperationContext {
 }
 
 beforeAll(async () => {
-  mkdirSync(join(packsDir, 'my-fork'), { recursive: true });
-  writeFileSync(join(packsDir, 'my-fork', 'pack.json'), '{"not":"a-valid-manifest"}\n');
+  // 'my-fork' plus the dot/underscore shapes the manifest schema blesses
+  // (/^[a-z0-9._-]+$/ in manifest-v1.ts) and schema init/fork never
+  // validated — pre-existing packs with these names exist legally, so the
+  // guard must ACCEPT them (refusal would permanently brick their mutation).
+  for (const legit of ['my-fork', 'my_pack', 'notes.v2']) {
+    mkdirSync(join(packsDir, legit), { recursive: true });
+    writeFileSync(join(packsDir, legit, 'pack.json'), '{"not":"a-valid-manifest"}\n');
+  }
   writeFileSync(sentinelPath, SENTINEL_BYTES);
   engine = new PGLiteEngine();
   await engine.connect({});
@@ -56,7 +62,10 @@ afterAll(async () => {
   rmSync(home, { recursive: true, force: true });
 }, 60_000);
 
-const BAD_NAMES = ['../evil', '..', 'a/b', '/etc/gbrain', '', 'x\0y', 'A-Upper', 'a'.repeat(129)];
+// '.hidden' pins the leading-alnum rule: dots are legal INSIDE a name
+// ('notes.v2' is accepted below) but a leading dot ('.', '..', dotfiles)
+// stays INVALID_PACK_NAME.
+const BAD_NAMES = ['../evil', '..', '.hidden', 'a/b', '/etc/gbrain', '', 'x\0y', 'A-Upper', 'a'.repeat(129)];
 
 describe('locateMutablePackFile name guard (unit half)', () => {
   test('traversal/charset/NUL/oversize names throw INVALID_PACK_NAME, no path echo', async () => {
@@ -85,11 +94,16 @@ describe('locateMutablePackFile name guard (unit half)', () => {
     });
   });
 
-  test('positive-accept: a legit non-bundled fork name resolves its pack file', async () => {
+  test('positive-accept: legit non-bundled names resolve — including dot/underscore shapes the manifest schema blesses', async () => {
     await withEnv({ GBRAIN_HOME: home }, async () => {
-      const located = locateMutablePackFile('my-fork');
-      expect(located.path).toBe(join(packsDir, 'my-fork', 'pack.json'));
-      expect(located.format).toBe('json');
+      // 'my_pack' / 'notes.v2' were INVALID_PACK_NAME under the initial
+      // kebab-only guard — a compat break for legally-created packs. The
+      // widened guard (^[a-z0-9][a-z0-9._-]*$) accepts them.
+      for (const legit of ['my-fork', 'my_pack', 'notes.v2']) {
+        const located = locateMutablePackFile(legit);
+        expect(located.path).toBe(join(packsDir, legit, 'pack.json'));
+        expect(located.format).toBe('json');
+      }
     });
   });
 });

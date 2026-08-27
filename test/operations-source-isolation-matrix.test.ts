@@ -25,6 +25,8 @@
 import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { operations, type OperationContext } from '../src/core/operations.ts';
+import { OperationError } from '../src/core/ops/contract.ts';
+import { readOps } from './helpers/ops-registry.ts';
 import { linkEntityIdentity } from '../src/core/entity-identity.ts';
 
 let engine: PGLiteEngine;
@@ -59,24 +61,42 @@ interface IsolatedRow {
   args: Record<string, unknown>;
   /** Custom control-visibility probe (echo ops); default = whole-JSON leak scan. */
   controlSees?: (result: unknown) => boolean;
-  /** Custom scoped assertion (echo ops); default = whole-JSON no-leak scan. */
-  expectScoped?: (result: unknown) => void;
+  /**
+   * Custom scoped assertion (echo ops); default = whole-JSON no-leak scan.
+   * Receives the ctx label so a row can express DIFFERENT contracts for the
+   * scalar default-source floor vs a federated grant (the #4433 boundary —
+   * see the sources_status row).
+   */
+  expectScoped?: (result: unknown, ctxLabel: 'scalar' | 'federated') => void;
 }
 type Row =
   | IsolatedRow
   | { name: string; mode: 'brainwide'; args: Record<string, unknown>; rationale: string }
   | { name: string; mode: 'skip'; reason: string };
 
-function TODAY(): string {
-  return new Date().toISOString().slice(0, 10);
-}
-function DAYS_AGO(n: number): string {
-  return new Date(Date.now() - n * 86400000).toISOString().slice(0, 10);
-}
-function LAST_YEAR_TODAY(): string {
-  const d = new Date();
-  return `${d.getUTCFullYear() - 1}${new Date().toISOString().slice(4, 10)}`;
-}
+// All wall-clock fixtures derive from ONE instant captured at module load, so
+// the MATRIX args and the beforeAll fixtures can never straddle midnight.
+// The prior-year date subtracts 365 days (leap-day-safe: never fabricates an
+// invalid `<year-1>-02-29`), then normalizes a Feb 29 landing to Feb 28 so
+// its month-day exists in EVERY year. (Same fixed-date discipline the
+// chronicle-ops-scope suite documents.)
+const CAPTURED_NOW_MS = Date.now();
+const isoDay = (ms: number): string => new Date(ms).toISOString().slice(0, 10);
+const TODAY = isoDay(CAPTURED_NOW_MS);
+const DAYS_AGO_7 = isoDay(CAPTURED_NOW_MS - 7 * 86_400_000);
+let anniversaryMs = CAPTURED_NOW_MS - 365 * 86_400_000;
+if (isoDay(anniversaryMs).endsWith('-02-29')) anniversaryMs -= 86_400_000;
+const ANNIVERSARY = isoDay(anniversaryMs);
+// chronicle_on_this_day matches the month-day of an EXPLICIT anchor against
+// prior-year rows. Deriving the anchor from ANNIVERSARY (same month-day, a
+// strictly later year) keeps the pair matched on every calendar day —
+// relying on the implicit current_date anchor would miss the fixture
+// whenever a Feb 29 sits between ANNIVERSARY and today.
+const ANNIVERSARY_MMDD = ANNIVERSARY.slice(5);
+const SAME_MMDD_THIS_YEAR = `${TODAY.slice(0, 4)}-${ANNIVERSARY_MMDD}`;
+const ON_THIS_DAY_ANCHOR = SAME_MMDD_THIS_YEAR > ANNIVERSARY
+  ? SAME_MMDD_THIS_YEAR
+  : `${Number(TODAY.slice(0, 4)) + 1}-${ANNIVERSARY_MMDD}`;
 
 // ─── The matrix ────────────────────────────────────────────────────────────
 const MATRIX: Row[] = [
@@ -143,9 +163,9 @@ const MATRIX: Row[] = [
   { name: 'recall', mode: 'isolated', args: { query: 'BETAMARKER', limit: 20 } },
   { name: 'find_contradictions', mode: 'isolated', args: {} },
   { name: 'find_experts', mode: 'isolated', args: { topic: 'BETAMARKER', limit: 10 } },
-  { name: 'chronicle_day', mode: 'isolated', args: { date: TODAY() } },
-  { name: 'chronicle_on_this_day', mode: 'isolated', args: {} },
-  { name: 'chronicle_since', mode: 'isolated', args: { date: DAYS_AGO(7) } },
+  { name: 'chronicle_day', mode: 'isolated', args: { date: TODAY } },
+  { name: 'chronicle_on_this_day', mode: 'isolated', args: { date: ON_THIS_DAY_ANCHOR } },
+  { name: 'chronicle_since', mode: 'isolated', args: { date: DAYS_AGO_7 } },
   { name: 'chronicle_last_seen', mode: 'isolated', args: { entity: 'people/beta-person' },
     controlSees: r => (r as { last_date?: string | null })?.last_date != null,
     expectScoped: r => {
@@ -163,9 +183,21 @@ const MATRIX: Row[] = [
   { name: 'ontology_dimensions', mode: 'isolated', args: {} },
   { name: 'volunteer_chronicle', mode: 'isolated', args: { days: 30, limit: 50 } },
   { name: 'extraction_pending', mode: 'isolated', args: { limit: 50 } },
+  // #4433 boundary (mirrors sources_list): only a FEDERATED grant confines
+  // sources_status — an out-of-grant id answers not_found (handled by the
+  // walk's fail-closed catch arm, so REACHING expectScoped under 'federated'
+  // is itself the failure). The remote SCALAR ctx is the documented
+  // default-source floor: it may name any source explicitly, so the status
+  // payload for the caller-named id is ALLOWED and not a leak (the payload
+  // is diagnostics for the id the caller itself supplied).
   { name: 'sources_status', mode: 'isolated', args: { id: 'srcbeta' },
     controlSees: r => JSON.stringify(r).includes('srcbeta'),
-    expectScoped: () => { throw new Error('sources_status must fail closed (not_found) for out-of-scope ids'); } },
+    expectScoped: (r, ctxLabel) => {
+      if (ctxLabel === 'federated') {
+        throw new Error('sources_status must fail closed (not_found) for out-of-federated-grant ids');
+      }
+      expect((r as { id?: string })?.id).toBe('srcbeta');
+    } },
   { name: 'schema_stats', mode: 'isolated', args: {} },
   { name: 'schema_review_orphans', mode: 'isolated', args: { limit: 50 } },
 
@@ -197,7 +229,7 @@ beforeAll(async () => {
     }, { sourceId: src });
     await engine.putPage(`notes/${name}-note`, {
       type: 'note', title: `${MARK} Note`, compiled_truth: `${name}-secret-content ${MARK}`,
-      timeline: `- ${TODAY()}: ${MARK} timeline entry`, frontmatter: { marker: MARK },
+      timeline: `- ${TODAY}: ${MARK} timeline entry`, frontmatter: { marker: MARK },
     }, { sourceId: src });
     // Typeless page: schema_review_orphans lists pages with NULL/empty type.
     await engine.putPage(`misc/${name}-orphan`, {
@@ -236,15 +268,15 @@ beforeAll(async () => {
       entitySlug: `people/${name}-person`, dimension: `${name}markerdim`, value: `${MARK}Corp`,
       confidence: 0.9, source: `test:${name}`, sourceId: src,
     } as any);
-    // Chronicle events: one today, one exactly a year ago (on_this_day reads
-    // prior-year same month-day).
+    // Chronicle events: one today, one a year ago (on_this_day matches the
+    // prior-year row against the ON_THIS_DAY_ANCHOR arg's month-day).
     await engine.upsertEventProjection({
       depthSlug: `people/${name}-person`, eventSlug: `notes/${name}-note`,
-      date: TODAY(), summary: `${MARK} event summary`, sourceId: src,
+      date: TODAY, summary: `${MARK} event summary`, sourceId: src,
     });
     await engine.upsertEventProjection({
       depthSlug: `people/${name}-person`, eventSlug: `misc/${name}-orphan`,
-      date: LAST_YEAR_TODAY(), summary: `${MARK} anniversary event`, sourceId: src,
+      date: ANNIVERSARY, summary: `${MARK} anniversary event`, sourceId: src,
     });
     const page = await engine.getPage(`notes/${name}-note`, { sourceId: src });
     if (page) {
@@ -280,7 +312,9 @@ afterAll(async () => {
 // ─── Ratchet: the table covers the registry exactly ───────────────────────
 describe('matrix coverage ratchet', () => {
   test('every non-localOnly read op has exactly one disposition row', () => {
-    const registry = operations.filter(o => o.scope === 'read' && !o.localOnly).map(o => o.name).sort();
+    // Shared enumeration seam (test/helpers/ops-registry.ts): one definition
+    // of "the remotely-servable read surface" across every sweeping suite.
+    const registry = readOps().map(o => o.name).sort();
     const table = MATRIX.map(r => r.name).sort();
     expect(table).toEqual(registry);
     const dupes = table.filter((n, i) => table.indexOf(n) !== i);
@@ -327,11 +361,20 @@ describe('source isolation matrix', () => {
         let result: unknown;
         try {
           result = await op.handler(ctx, row.args);
-        } catch {
-          continue; // a scoped refusal (e.g. not_found) is fail-closed — acceptable
+        } catch (e) {
+          // A scoped refusal is acceptable ONLY as a typed fail-closed
+          // OperationError (not_found / page_not_found — the page-read ops'
+          // anti-enumeration miss shape / permission_denied / invalid_params).
+          // Anything else — a crash, an engine error, a mistyped code — is a
+          // real failure a bare `continue` used to swallow silently.
+          if (e instanceof OperationError
+            && ['not_found', 'page_not_found', 'permission_denied', 'invalid_params'].includes(e.code)) {
+            continue;
+          }
+          throw e;
         }
         if (row.expectScoped) {
-          row.expectScoped(result);
+          row.expectScoped(result, label);
         } else {
           const leaked = leakToken(result);
           if (leaked) {

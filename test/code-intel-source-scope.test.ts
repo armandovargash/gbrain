@@ -5,24 +5,25 @@
  * (src/core/ops/code-intel.ts) so none of it stays ambiguous:
  *
  *   - code_def / code_refs — BRAIN-WIDE BY DESIGN (documented decision:
- *     the handler comments at src/core/ops/code-intel.ts:110 and :133 say
- *     "brain-wide (not source-scoped)", and the underlying SQL in
- *     src/commands/code-def.ts:findCodeDef / src/commands/code-refs.ts:
- *     findCodeRefs carries NO source filter). A remote caller scoped to
- *     srcalpha (scalar or federated grant) CAN see srcbeta definitions and
- *     references. Rows do NOT project source_id (slug is the only source
- *     signal) — pinned below so a future scoping change trips this suite
- *     deliberately rather than drifting silently.
+ *     the brain-wide comments in code_def's and code_refs' handlers in
+ *     src/core/ops/code-intel.ts say "brain-wide (not source-scoped)", and
+ *     the underlying SQL in src/commands/code-def.ts:findCodeDef /
+ *     src/commands/code-refs.ts:findCodeRefs carries NO source filter). A
+ *     remote caller scoped to srcalpha (scalar or federated grant) CAN see
+ *     srcbeta definitions and references. Rows do NOT project source_id
+ *     (slug is the only source signal) — pinned below so a future scoping
+ *     change trips this suite deliberately rather than drifting silently.
  *
  *   - code_blast / code_flow — fenced through resolveCodeIntelScope
- *     (src/core/ops/context.ts:576): remote + no source in scope →
- *     permission_denied (context.ts:596); remote + multi-source federated
- *     grant → invalid_params "single source" (context.ts:586); scoped →
+ *     (src/core/ops/context.ts): remote + no source in scope → the
+ *     resolver's permission_denied throw; remote + multi-source federated
+ *     grant → its invalid_params "single source" throw; scoped →
  *     single-source traversal (disambiguation AND edge walk both filter by
  *     that source).
  *
  *   - code_callees — mirrors code_callers' contract (already pinned for
- *     LOCAL ctx in test/e2e/code-intel-mcp-ops-pglite.test.ts:117-152; those
+ *     LOCAL ctx by the code_callers assertions in
+ *     test/e2e/code-intel-mcp-ops-pglite.test.ts; those
  *     assertions are NOT duplicated here). This suite adds the REMOTE side:
  *     scalar/federated alpha scope isolates beta edges, and all_sources=true
  *     from a remote caller collapses to the caller's grant instead of
@@ -172,12 +173,13 @@ async function seedTwoSourceCodeGraph(): Promise<void> {
 // ─── (1) code_def / code_refs: brain-wide by design — pinned explicitly ────
 
 describe('A13 — code_def / code_refs are brain-wide by design (documented decision)', () => {
-  test('code_def: alpha-scoped remote caller sees a beta-only definition (code-intel.ts:110)', async () => {
+  test('code_def: alpha-scoped remote caller sees a beta-only definition (brain-wide handler)', async () => {
     await seedTwoSourceCodeGraph();
     const op = operationsByName.code_def!;
     // DOCUMENTED DECISION: code_def does not route through ctx scope — the
     // findCodeDef SQL (src/commands/code-def.ts) has no source filter and the
-    // handler comment at src/core/ops/code-intel.ts:110 names it brain-wide.
+    // brain-wide comment in code_def's handler (src/core/ops/code-intel.ts)
+    // names it brain-wide.
     const result = (await op.handler(remoteAlpha(), { symbol: 'betaSecretFn' })) as {
       count: number;
       defs: Array<Record<string, unknown>>;
@@ -203,12 +205,12 @@ describe('A13 — code_def / code_refs are brain-wide by design (documented deci
     expect(result.defs[0]!.slug).toBe('src/beta-lib.ts');
   });
 
-  test('code_refs: alpha-scoped remote caller sees beta chunk text (code-intel.ts:133)', async () => {
+  test('code_refs: alpha-scoped remote caller sees beta chunk text (brain-wide handler)', async () => {
     await seedTwoSourceCodeGraph();
     const op = operationsByName.code_refs!;
     // DOCUMENTED DECISION: findCodeRefs (src/commands/code-refs.ts) is an
-    // unscoped ILIKE scan over content_chunks; the handler comment at
-    // src/core/ops/code-intel.ts:133 names it brain-wide.
+    // unscoped ILIKE scan over content_chunks; the brain-wide comment in
+    // code_refs' handler (src/core/ops/code-intel.ts) names it brain-wide.
     const result = (await op.handler(remoteAlpha(), { symbol: 'betaSecretFn' })) as {
       count: number;
       refs: Array<Record<string, unknown>>;
@@ -224,7 +226,7 @@ describe('A13 — code_def / code_refs are brain-wide by design (documented deci
 // ─── (2) code_blast / code_flow: the resolveCodeIntelScope fence ──────────
 
 describe('A13 — code_blast / code_flow resolveCodeIntelScope fence', () => {
-  test('code_blast: remote ctx with NO scope is refused with permission_denied (context.ts:596)', async () => {
+  test('code_blast: remote ctx with NO scope is refused with permission_denied (resolveCodeIntelScope no-scope throw)', async () => {
     await seedTwoSourceCodeGraph();
     const op = operationsByName.code_blast!;
     await expectOpError(
@@ -234,7 +236,7 @@ describe('A13 — code_blast / code_flow resolveCodeIntelScope fence', () => {
     );
   });
 
-  test('code_flow: remote ctx with NO scope is refused with permission_denied (context.ts:596)', async () => {
+  test('code_flow: remote ctx with NO scope is refused with permission_denied (resolveCodeIntelScope no-scope throw)', async () => {
     await seedTwoSourceCodeGraph();
     const op = operationsByName.code_flow!;
     await expectOpError(
@@ -244,7 +246,7 @@ describe('A13 — code_blast / code_flow resolveCodeIntelScope fence', () => {
     );
   });
 
-  test('code_blast: remote multi-source federated grant is refused with invalid_params (context.ts:586)', async () => {
+  test("code_blast: remote multi-source federated grant is refused with invalid_params (resolveCodeIntelScope's multi-source throw)", async () => {
     await seedTwoSourceCodeGraph();
     const op = operationsByName.code_blast!;
     // Traversal is single-source by design; a two-source grant must name one.

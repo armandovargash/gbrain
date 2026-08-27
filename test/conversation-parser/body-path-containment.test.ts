@@ -8,7 +8,7 @@
  * only (never the attempted path). Mirrors the LocalStorage traversal block
  * in test/storage.test.ts.
  */
-import { describe, test, expect, beforeAll, afterAll, beforeEach, afterEach, spyOn } from 'bun:test';
+import { describe, test, expect, afterAll, beforeEach, afterEach, spyOn } from 'bun:test';
 import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -45,7 +45,6 @@ let warnSpy: ReturnType<typeof spyOn>;
 beforeEach(() => { warnSpy = spyOn(console, 'warn').mockImplementation(() => {}); });
 afterEach(() => { warnSpy.mockRestore(); });
 
-beforeAll(() => {});
 afterAll(() => {
   rmSync(realRepo, { recursive: true, force: true });
   rmSync(linkParent, { recursive: true, force: true });

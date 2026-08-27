@@ -8,7 +8,6 @@
 
 import type { Operation } from './contract.ts';
 import { OperationError } from './contract.ts';
-import { sourceScopeOpts } from './context.ts';
 
 // --- v0.28: whoami + sources management ---
 
@@ -231,12 +230,16 @@ const sources_status: Operation = {
   },
   scope: 'read',
   handler: async (ctx, p) => {
-    // Source isolation: a scoped caller may only diagnose sources inside its
-    // scope. Out-of-scope ids answer not_found — indistinguishable from a
-    // nonexistent source (anti-enumeration), matching get_agent_job's shape.
-    const scope = sourceScopeOpts(ctx);
-    const allowed = scope.sourceIds ?? (scope.sourceId !== undefined ? [scope.sourceId] : null);
-    if (allowed && !allowed.includes(p.id as string)) {
+    // Source isolation, mirroring sources_list's #4433 boundary exactly:
+    // only a FEDERATED grant (non-empty ctx.auth.allowedSources) confines
+    // which sources a remote caller may diagnose. The scalar default-source
+    // floor (a remote caller with only ctx.sourceId) may name any source
+    // explicitly — same as resolveRequestedScope's explicit-source_id rule —
+    // and trusted local CLI is never confined. Out-of-grant ids answer
+    // not_found, indistinguishable from a nonexistent source
+    // (anti-enumeration), matching get_agent_job's shape.
+    const granted = ctx.remote !== false ? ctx.auth?.allowedSources : undefined;
+    if (granted && granted.length > 0 && !granted.includes(p.id as string)) {
       throw new OperationError('not_found', `Unknown source: ${p.id}`);
     }
     const { getSourceStatus } = await import('../sources-ops.ts');

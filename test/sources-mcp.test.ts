@@ -170,16 +170,53 @@ describe('sources_* handlers — happy path', () => {
         url: 'https://github.com/example/repo',
       });
       const statusOp = findOp('sources_status');
-      // This test pins the STATUS payload (clone_state/remote_url); the scope
-      // fence (out-of-scope id → not_found) has its own dedicated suite. Scope
-      // the caller to the source under test so the fence admits the read.
-      const result = (await statusOp.handler(
-        { ...ctxRemote(['read']), sourceId: 'mcp-status-test' },
-        { id: 'mcp-status-test' },
-      )) as any;
+      // A plain scalar remote caller (ctx.sourceId 'default', no federated
+      // grant) may status ANY source by naming it explicitly — the #4433
+      // boundary confines only FEDERATED grants (see the dedicated negative
+      // test below).
+      const result = (await statusOp.handler(ctxRemote(['read']), {
+        id: 'mcp-status-test',
+      })) as any;
       expect(result.id).toBe('mcp-status-test');
       expect(result.clone_state).toBe('healthy');
       expect(result.remote_url).toBe('https://github.com/example/repo');
+    });
+  });
+
+  test('sources_status: FEDERATED grant confines — out-of-grant EXISTING id answers exactly like a nonexistent id', async () => {
+    await withEnv({ GBRAIN_HOME, PATH: fakePath() }, async () => {
+      const addOp = findOp('sources_add');
+      await addOp.handler(ctxRemote(['sources_admin']), {
+        id: 'mcp-fed-test',
+        url: 'https://github.com/example/repo',
+      });
+      const statusOp = findOp('sources_status');
+      // #4433 boundary: a federated grant (non-empty auth.allowedSources) is
+      // the ONLY remote shape that confines sources_status. Out-of-grant ids
+      // must answer not_found — indistinguishable from a nonexistent source
+      // (anti-enumeration).
+      const base = ctxRemote(['read']);
+      const fedCtx: OperationContext = {
+        ...base,
+        auth: { ...base.auth!, allowedSources: ['other-src'] },
+      };
+      const errFor = async (id: string): Promise<OperationError> => {
+        try {
+          await statusOp.handler(fedCtx, { id });
+        } catch (e) {
+          expect(e).toBeInstanceOf(OperationError);
+          return e as OperationError;
+        }
+        throw new Error(`expected sources_status(${id}) to throw for the federated caller`);
+      };
+      const existing = await errFor('mcp-fed-test');       // exists, out of grant
+      const nonexistent = await errFor('no-such-source');  // genuinely missing
+      expect(existing.code).toBe('not_found');
+      expect(nonexistent.code).toBe('not_found');
+      // Anti-enumeration pin: the two messages are IDENTICAL after id
+      // substitution — the error shape cannot be used as an existence oracle.
+      expect(existing.message.replaceAll('mcp-fed-test', '<id>'))
+        .toBe(nonexistent.message.replaceAll('no-such-source', '<id>'));
     });
   });
 

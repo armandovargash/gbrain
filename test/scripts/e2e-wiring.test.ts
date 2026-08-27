@@ -17,10 +17,14 @@
  *   6. Unmapped-file ratchet: every test/e2e/*.test.ts is mapped in
  *      E2E_TEST_MAP, named in the workflow, or grandfathered in
  *      test/fixtures/e2e-unmapped-baseline.txt (shrink-only). A NEW e2e
- *      file must be mapped (preferred) or consciously baselined.
+ *      file must be mapped (preferred) or consciously baselined. The
+ *      baseline itself is enforced both ways: a row naming a deleted file
+ *      is stale (remove the line), a row that E2E_TEST_MAP or the workflow
+ *      already claims is redundant (remove the line), and total length may
+ *      never grow past the seeded literal.
  */
 import { describe, test, expect } from 'bun:test';
-import { readdirSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { E2E_TEST_MAP } from '../../scripts/e2e-test-map.ts';
 
@@ -87,13 +91,20 @@ describe('selected-e2e job wiring', () => {
   });
 });
 
+/**
+ * The CURRENT number of baseline entries. NEVER raise this number; when the
+ * baseline shrinks (a file gets mapped or deleted), lower this constant IN
+ * THE SAME COMMIT (the module-size ratchet's no-stale-slack convention).
+ */
+const BASELINE_SEEDED_LENGTH = 153;
+
 describe('e2e file claim ratchet', () => {
+  const mapped = new Set(Object.values(E2E_TEST_MAP).flat());
+  const baselineEntries = readFileSync(join(repoRoot, 'test/fixtures/e2e-unmapped-baseline.txt'), 'utf8')
+    .split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('#'));
+  const baseline = new Set(baselineEntries);
+
   test('every e2e file is mapped, workflow-named, or grandfathered (shrink-only baseline)', () => {
-    const mapped = new Set(Object.values(E2E_TEST_MAP).flat());
-    const baseline = new Set(
-      readFileSync(join(repoRoot, 'test/fixtures/e2e-unmapped-baseline.txt'), 'utf8')
-        .split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('#')),
-    );
     const files = readdirSync(join(repoRoot, 'test/e2e'))
       .filter(f => f.endsWith('.test.ts'))
       .map(f => `test/e2e/${f}`);
@@ -111,6 +122,33 @@ describe('e2e file claim ratchet', () => {
     const real = new Set(files);
     const dangling = [...mapped].filter(f => !real.has(f));
     expect(dangling).toEqual([]);
+  });
+
+  test('no stale baseline entries: every row names an existing e2e file', () => {
+    const stale = baselineEntries.filter(f => !existsSync(join(repoRoot, f)));
+    if (stale.length > 0) {
+      throw new Error(
+        `baseline row(s) name deleted e2e file(s) — remove the line from ` +
+        `test/fixtures/e2e-unmapped-baseline.txt (the ratchet only shrinks):\n` +
+        stale.join('\n'),
+      );
+    }
+  });
+
+  test('no redundant baseline entries: a mapped or workflow-named file must leave the baseline', () => {
+    const redundant = baselineEntries.filter(f => mapped.has(f) || yml.includes(f));
+    if (redundant.length > 0) {
+      throw new Error(
+        `baseline row(s) already claimed by E2E_TEST_MAP or the workflow — ` +
+        `remove the line from test/fixtures/e2e-unmapped-baseline.txt ` +
+        `(mapped ⇒ off the baseline):\n` +
+        redundant.join('\n'),
+      );
+    }
+  });
+
+  test('baseline is shrink-only (seeded length ratchet)', () => {
+    expect(baselineEntries.length).toBeLessThanOrEqual(BASELINE_SEEDED_LENGTH);
   });
 
   test('select-e2e fail-closed behavior has its own behavioral suite', () => {
