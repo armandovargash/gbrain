@@ -237,8 +237,21 @@ describe('autopilot linux lifecycle (PATH-shimmed crontab/systemctl)', () => {
   // byte-identity against it.
   let stateAfterInstall = '';
 
-  test('install --target linux-cron adds ONE autopilot line; foreign lines survive byte-identical', () => {
+  test('PGLite refusal: install without --force exits 1 recommending `gbrain serve` (single-writer lock)', () => {
+    // Master's db-availability wave: a daemonized autopilot on a PGLite
+    // brain would hold the exclusive DB lock 24/7, so install refuses
+    // without --force. Pin the refusal (exit 1, serve recommendation, no
+    // crontab write) — the lifecycle tests below all pass --force.
     const r = runCli(['autopilot', '--install', '--target', 'linux-cron', '--repo', repoDir]);
+    expect(r.status).toBe(1);
+    const out = r.stdout + r.stderr;
+    expect(out).toContain('PGLite');
+    expect(out).toContain('--force');
+    expect(readCronState()).toBe(FOREIGN);
+  });
+
+  test('install --target linux-cron adds ONE autopilot line; foreign lines survive byte-identical', () => {
+    const r = runCli(['autopilot', '--install', '--force', '--target', 'linux-cron', '--repo', repoDir]);
     expect(r.status, `install failed:\nSTDOUT:\n${r.stdout}\nSTDERR:\n${r.stderr}`).toBe(0);
     expect(r.stdout).toContain('Installed crontab entry for gbrain autopilot (every 5 minutes)');
 
@@ -267,7 +280,7 @@ describe('autopilot linux lifecycle (PATH-shimmed crontab/systemctl)', () => {
 
   test('reinstall is idempotent: exactly one autopilot line, no table rewrite, foreign intact', () => {
     const callsBefore = readLines(cronArgvLog).length;
-    const r = runCli(['autopilot', '--install', '--target', 'linux-cron', '--repo', repoDir]);
+    const r = runCli(['autopilot', '--install', '--force', '--target', 'linux-cron', '--repo', repoDir]);
     expect(r.status, `reinstall failed:\nSTDOUT:\n${r.stdout}\nSTDERR:\n${r.stderr}`).toBe(0);
     expect(r.stdout).toContain('Crontab entry already exists');
 
@@ -298,7 +311,7 @@ describe('autopilot linux lifecycle (PATH-shimmed crontab/systemctl)', () => {
 
   test('install --target linux-systemd writes a 0644 unit and runs daemon-reload → enable --now → try-restart', () => {
     rmSync(sysctlLog, { force: true });
-    const r = runCli(['autopilot', '--install', '--target', 'linux-systemd', '--repo', repoDir]);
+    const r = runCli(['autopilot', '--install', '--force', '--target', 'linux-systemd', '--repo', repoDir]);
     expect(r.status, `systemd install failed:\nSTDOUT:\n${r.stdout}\nSTDERR:\n${r.stderr}`).toBe(0);
     expect(r.stdout).toContain('Installed systemd user service: gbrain-autopilot.service');
 

@@ -326,6 +326,11 @@ describeWhen('thin-client end-to-end (requires DATABASE_URL)', () => {
       `The secret phrase is ${G3_MARKER} and it lives only in the host brain.`,
       '',
     ].join('\n');
+    // Shared-DB hygiene: a prior suite in the full-glob run can leave
+    // `sync.repo_path` in the shared config table pointing at a deleted temp
+    // repo, which makes put_page's reverse-write refuse (repo_not_found).
+    // Clear it — suites that need it set it themselves.
+    await spawn(['config', 'unset', 'sync.repo_path'], hostHome);
     const put = await spawn(['put', G3_SLUG, '--content', content], hostHome);
     if (put.exitCode !== 0) throw new Error(`seed put failed: ${put.stderr || put.stdout}`);
     const rem = await spawn(

@@ -156,9 +156,8 @@ export const E2E_TEST_MAP: Record<string, string[]> = {
     // (mapped at the test-gap-wave merge — arrived unclaimed).
     "test/e2e/salience-anomalies-source-isolation-pglite.test.ts",
   ],
-  // The CJK keyword branch exists ONLY in the PGLite engine (ILIKE +
-  // term-frequency); Postgres has none. The cross-engine asymmetry is a
-  // pinned, documented gap — any change here must re-run the pin. (Matches
+  // Both engines route CJK queries through the shared branch since #3986
+  // (src/core/search/cjk-keyword-sql.ts). The cross-engine parity is pinned — any change here must re-run the pin. (Matches
   // src/core/pglite-engine/** too; selector unions the entries.)
   "src/core/pglite-engine/cjk-search.ts": ["test/e2e/engine-parity-cjk.test.ts"],
   // D7 parity batch: the code-edge read paths (getCallersOf / getCalleesOf /
