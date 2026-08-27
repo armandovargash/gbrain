@@ -112,6 +112,12 @@ Sync only indexes "syncable" markdown files. These are excluded by design:
   (`node_modules/`, `dist/`, `build/`, `venv/`)
 - Meta files: `README.md`, `index.md`, `schema.md`, `log.md`, `RESOLVER.md`
 
+A dot-directory you deliberately keep content in (say `.decisions/`) can be
+waived back in with `--include-hidden '<glob>'` on `gbrain sync` and
+`gbrain import` — the glob names exactly which hidden paths to admit
+(`gbrain sync --include-hidden '.decisions/**'`); everything else hidden
+stays pruned, and vendored/generated exclusions are never waived.
+
 Everything else is ordinary synced content — including `ops/` (the bundled
 daily-task-manager skill files its canonical page under `ops/tasks`).
 
