@@ -812,7 +812,7 @@ CREATE INDEX IF NOT EXISTS idx_chat_usage_log_created
 CREATE INDEX IF NOT EXISTS idx_chat_usage_log_model
   ON chat_usage_log (model, created_at);
 
--- open_loops (migration v142): the Gmail-first open-loop engine's structured
+-- open_loops (migration v143): the Gmail-first open-loop engine's structured
 -- record — "who is waiting on you, what you promised". Deduped per source on
 -- dedup_key; loops close by state transition, never delete. fact_id projects
 -- LLM-extracted commitments into the facts table so entity cards see them.
@@ -849,7 +849,7 @@ CREATE INDEX IF NOT EXISTS open_loops_counterparty_idx
 CREATE INDEX IF NOT EXISTS open_loops_thread_idx
   ON open_loops (source_id, thread_id) WHERE status = 'open';
 
--- loop_suppressions (migration v142): `gbrain loops mute <sender|thread>` —
+-- loop_suppressions (migration v143): `gbrain loops mute <sender|thread>` —
 -- the detector's user feedback loop. Suppressed senders/threads never open
 -- new loops (existing loops keep their state).
 CREATE TABLE IF NOT EXISTS loop_suppressions (

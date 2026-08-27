@@ -1053,7 +1053,7 @@ CREATE INDEX IF NOT EXISTS idx_chat_usage_log_created
 CREATE INDEX IF NOT EXISTS idx_chat_usage_log_model
   ON chat_usage_log (model, created_at);
 
--- open_loops + loop_suppressions (migration v142). See src/schema.sql for rationale.
+-- open_loops + loop_suppressions (migration v143). See src/schema.sql for rationale.
 CREATE TABLE IF NOT EXISTS open_loops (
   id                 BIGSERIAL PRIMARY KEY,
   source_id          TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
