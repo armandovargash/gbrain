@@ -127,6 +127,43 @@ consecutive failures instead of wedging the sync forever;
 `gbrain sync --source <id> --full` retries skipped threads with a fresh
 ledger.
 
+## Other ways to reach Google (no gbrain OAuth)
+
+If your stack already holds Google access another way — a Google CLI with its
+own auth store, `gcloud`, or a credential gateway that can mint short-lived
+access tokens — the source can use it directly and skip gbrain's OAuth flow
+entirely. `--account` stays required as the IDENTITY (it drives "is this
+message mine" loop direction and the Gmail deep links' `authuser`); no
+credential is stored in gbrain for these modes.
+
+**Say to your agent:** *"connect my gmail through my existing Google CLI —
+your agent runs `gbrain sources add <id> --kind google --access command
+--token-command \"<your token command>\" --account <email>`"*
+
+```bash
+# Any command that prints an access token (bare token, or JSON with a
+# token/access_token field and optional expiry/expires_in). gbrain runs it
+# at sync time and caches the token until it expires; it never stores it.
+gbrain sources add gmail-work --kind google --account you@example.com \
+  --access command --token-command "gcloud auth print-access-token"
+
+# Or read a live token from an env var refreshed by something outside gbrain
+# (a gateway sidecar, a cron job). The var NAME goes in config, never a value.
+gbrain sources add gmail-work --kind google --account you@example.com \
+  --access env --token-env GOOGLE_ACCESS_TOKEN
+```
+
+What changes vs the vault flow: `gbrain google status`'s refresh probe and
+`gbrain doctor`'s `google_oauth` check cover vault accounts only (your
+external tool owns token health); the scope preflight trusts `--services`
+(a token missing a scope surfaces as `api_not_enabled`/`upstream` per sweep
+instead of `scope_missing`); send-as aliases are fetched live when the token
+allows it, otherwise identity degrades to the account address alone. The
+token command runs locally at sync time with your shell — it lives in local
+source config, is never reachable over MCP, and is the same trust class as a
+recipe health-check command. Failures surface as `access_command_failed` /
+`access_env_missing` with the fix attached.
+
 ## Troubleshooting
 
 Every failure the connector can hit maps to a typed error with the fix
@@ -157,6 +194,8 @@ attached. The catalog (also emitted as structured JSON with `--json`):
 | `relay_unreachable` / `relay_session_expired` / `claim_already_used` / `relay_disabled` | Hosted fast-path (gbrain.io relay) issues | BYO connect always works: `gbrain google connect` |
 | `not_connected` | No vault entry for the account | `gbrain google connect` |
 | `upstream` | Google returned an unexpected error | Retry; if it persists, run `gbrain google status --json` and file the output |
+| `access_command_failed` | The `--access command` token command exited non-zero, timed out, or printed nothing token-shaped | Run it by hand; it must print a bare token or JSON with `token`/`access_token` |
+| `access_env_missing` | The `--access env` variable is unset/blank in this process | Export a live token into it (refresh externally), or switch back to the vault flow |
 
 Cursor expiries (`historyId` older than ~a week, calendar/contacts
 `syncToken` 410) are handled automatically with bounded re-lists — never

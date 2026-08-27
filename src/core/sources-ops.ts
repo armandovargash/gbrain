@@ -181,7 +181,7 @@ export interface AddSourceOpts {
    * no secret ever lands in sources.config. See src/core/google/google-source.ts.
    */
   google?: {
-    /** Connected account email (vault credential pointer). */
+    /** Account email — vault credential pointer (vault mode) or identity only. */
     account: string;
     /** Subset of gmail,calendar,contacts (comma-joined into config). */
     services: string[];
@@ -189,6 +189,10 @@ export interface AddSourceOpts {
     historyDays: number;
     /** Managed dir where pages are materialized. */
     dir: string;
+    /** Token acquisition: gbrain vault (default), a token-printing command, or an env var. */
+    access?: 'vault' | 'command' | 'env';
+    tokenCommand?: string;
+    tokenEnv?: string;
   };
 }
 
@@ -613,6 +617,16 @@ export async function addSource(
       g_account: opts.google.account,
       g_services: opts.google.services.join(','),
       g_history_days: opts.google.historyDays,
+      // Non-vault access (v0.47): 'command' runs g_token_command locally at
+      // sync time (same trust class as recipe health_check argv — the google
+      // kind is hard-rejected on remote sources_add and these keys are not
+      // reachable over MCP); 'env' reads the env var NAMED here (never a
+      // secret value — the gh_token_env pattern).
+      ...(opts.google.access && opts.google.access !== 'vault'
+        ? { g_access: opts.google.access }
+        : {}),
+      ...(opts.google.tokenCommand ? { g_token_command: opts.google.tokenCommand } : {}),
+      ...(opts.google.tokenEnv ? { g_token_env: opts.google.tokenEnv } : {}),
       g_managed: finalPath === defaultCloneDir(`${opts.id}-google`),
       // Same default as github mirrors: a fresh google source participates
       // in unqualified reads unless --no-federated opts out.

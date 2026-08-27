@@ -82,7 +82,19 @@ counterparty, summary, due date; verbatim quotes, deep links, and the
 injectable `text` digest are trusted-local only. Remote callers also need a
 resolved source scope: an unscoped remote read is refused outright rather
 than spanning the brain, and the two write ops require a single-source scope
-that matches the caller's grants.
+that matches the caller's grants. `open_loops` takes per-call scope params —
+`source_id` (an MCP client whose transport is bound to another source can
+point the read at the google source, grant-checked for remote callers) and
+`all_sources` (trusted local spans the brain; remote stays in-grant).
+
+When the scope holds **no google source at all**, the result carries
+`no_google_sources: true` and the digest says so explicitly instead of "You
+are clean" — a brain whose email arrives through a gateway or agent-authored
+collector has nothing for the loop engine to read, which is not the same as
+an empty inbox. Any Google access path works to fix it: `gbrain google setup`
+(BYO OAuth) or `--access command|env` on `sources add` (an existing Google
+CLI or token-minting gateway; see
+[google-connect.md](google-connect.md#other-ways-to-reach-google-no-gbrain-oauth)).
 
 Memory verbs: entity cards' `open_threads[]` entries backed by loop rows
 carry additive optional fields (`direction`, `due`, `counterparty`,

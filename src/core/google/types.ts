@@ -11,13 +11,25 @@ export type GoogleService = 'gmail' | 'calendar' | 'contacts';
 export const ALL_GOOGLE_SERVICES: readonly GoogleService[] = ['gmail', 'calendar', 'contacts'];
 
 export interface GoogleSourceConfig {
-  /** Vault credential pointer — the connected account email. */
+  /** Account email — vault credential pointer in vault mode; identity only
+   *  (From/To matching, deep-link authuser) in command/env modes. */
   account: string;
   services: GoogleService[];
   /** Backfill/reconcile window in days (default 90). */
   historyDays: number;
   /** Managed dir where pages are materialized. */
   dir: string;
+  /**
+   * How the sweep obtains a Google access token (default 'vault'):
+   *  - 'vault'   — gbrain's credential vault (BYO OAuth / hosted relay).
+   *  - 'command' — run `tokenCommand`, expect a token on stdout (gog,
+   *                gcloud, a credential gateway's mint command).
+   *  - 'env'     — read a live token from the env var named `tokenEnv`
+   *                (refreshed by something outside gbrain).
+   */
+  access: 'vault' | 'command' | 'env';
+  tokenCommand?: string;
+  tokenEnv?: string;
 }
 
 /** Cursor state persisted at <dir>/.google-source.json. */

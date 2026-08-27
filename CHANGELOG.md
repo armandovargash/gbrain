@@ -52,6 +52,14 @@ promised, and the context needed to respond.
   routing, and per-credential refresh routing ship now (feature-gated off);
   the full server design for the gbrain.io team lands at
   `docs/designs/HOSTED_OAUTH_RELAY.md`.
+- **Bring your own Google access:** already reach Google through a CLI with
+  its own auth store, `gcloud`, or a credential gateway? Point the source at
+  it and skip gbrain's OAuth entirely — `gbrain sources add <id> --kind
+  google --access command --token-command "<cmd that prints a token>"` (or
+  `--access env --token-env <VAR>` for an externally-refreshed token). The
+  sweep, loop detection, and `gbrain waiting` work identically; gbrain never
+  stores the token, and failures speak the typed catalog
+  (`access_command_failed` / `access_env_missing`).
 - **Memory-verb integration:** the `entity` card's `open_threads` are now
   loop-backed (additive optional fields — direction, due, counterparty,
   status), so agents on any harness see open loops through the frozen verb
@@ -77,6 +85,13 @@ promised, and the context needed to respond.
   mute targets the google source instead of a useless default scope.
 - Remote open-loop reads fail closed without a resolved source scope, and
   evidence stays redacted for any non-local caller.
+- `gbrain waiting` on a brain with no google source connected now says so
+  (with the connect command) instead of a false "You are clean" — email that
+  arrives through a gateway or agent-authored collector is invisible to the
+  loop engine, which is not the same as an empty inbox.
+- The `open_loops` op takes `source_id` / `all_sources` (grant-checked for
+  remote callers), so an MCP client whose transport is bound to another
+  source can still reach the google source's loops.
 
 ### To take advantage of v0.47.0.0
 ```bash

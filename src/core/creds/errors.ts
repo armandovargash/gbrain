@@ -17,6 +17,9 @@ export type CredentialErrorCode =
   | 'client_json_wrong_type'
   | 'client_shape_invalid'
   | 'client_json_unreadable'
+  // non-vault access modes (--access command|env)
+  | 'access_command_failed'
+  | 'access_env_missing'
   // consent flow
   | 'redirect_uri_mismatch'
   | 'access_denied_test_user'
@@ -183,6 +186,18 @@ const CATALOG: Record<CredentialErrorCode, CatalogEntry> = {
     problem: 'No Google account is connected%s.',
     cause: 'The credential vault has no matching entry.',
     fix: 'Run `gbrain google connect` (or `gbrain google setup` for the full guided flow).',
+  },
+  access_command_failed: {
+    problem: 'The configured token command did not produce a Google access token%s.',
+    cause:
+      'This source uses `--access command`: gbrain runs your command (e.g. a gog/gcloud/gateway CLI) and expects an access token on stdout. It exited non-zero, timed out, or printed nothing usable.',
+    fix: 'Run the command by hand and confirm it prints a bare token (or JSON with a `token`/`access_token` field). Update it: `gbrain sources add <id> --kind google --access command --token-command "<cmd>" ...`.',
+  },
+  access_env_missing: {
+    problem: 'The configured token environment variable is empty%s.',
+    cause:
+      'This source uses `--access env`: gbrain reads a Google access token from the named env var, refreshed by something outside gbrain. The variable is unset or blank in this process.',
+    fix: 'Export the variable with a live access token before running the sync (short-lived tokens: refresh them externally, e.g. via cron), or switch the source back to the vault flow: `gbrain google setup`.',
   },
   upstream: {
     problem: 'Google returned an unexpected error%s.',

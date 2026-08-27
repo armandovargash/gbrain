@@ -202,6 +202,33 @@ describe('runWaiting', () => {
     expect(r.verdict).toBe(0);
   });
 
+  test('no google source in the brain → the honest connect hint prints (NOT "You are clean"), verdict 0; --json carries no_google_sources', async () => {
+    // Flip 'default' back to a plain (non-google) source: the open-loop
+    // engine now has nothing to read, and "You are clean" would be a
+    // confident lie on a brain whose email arrives some other way.
+    await engine.executeRaw(`UPDATE sources SET config = '{}'::jsonb WHERE id = 'default'`);
+    const r = await captured(() => runWaiting(engine, []));
+    expect(r.out).toContain('No google source is connected');
+    expect(r.out).not.toContain('You are clean');
+    expect(r.out).toContain('gbrain google setup'); // the connect fix rides along
+    expect(r.verdict).toBe(0); // an unconnected brain is not an error state
+
+    const j = await captured(() => runWaiting(engine, ['--json']));
+    const env = JSON.parse(j.out) as {
+      ok: boolean;
+      status: string;
+      count: number;
+      no_google_sources: boolean;
+      stale: boolean;
+    };
+    expect(env.ok).toBe(true);
+    expect(env.status).toBe('ok');
+    expect(env.no_google_sources).toBe(true);
+    expect(env.count).toBe(0);
+    expect(env.stale).toBe(false); // empty freshness set must not read stale
+    expect(j.verdict).toBe(0);
+  });
+
   test('loops in a NON-default google source are visible to the CLI (brain-wide __all__ scope)', async () => {
     // runWaiting passes sourceId '__all__' → trusted-local span of every
     // source — a loop detected by a real google sync (living in that source's

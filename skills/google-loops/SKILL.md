@@ -76,6 +76,19 @@ resumes on later syncs automatically) → the first `gbrain waiting` digest.
 
 Multiple accounts: repeat with `--account work@example.com`.
 
+Already holding Google access another way (a Google CLI with its own auth,
+`gcloud`, a credential gateway that mints tokens)? Skip OAuth and point the
+source at it — no credential enters gbrain:
+
+```bash
+gbrain sources add gmail-work --kind google --account you@example.com \
+  --access command --token-command "<command that prints an access token>"
+```
+
+(`--access env --token-env <VAR>` reads an externally-refreshed token from
+the environment instead.) Then `gbrain sync --source gmail-work` and
+`gbrain waiting` work identically.
+
 Verify health afterwards: `gbrain google status --json` (per-account
 refresh probe) — and `gbrain doctor` carries a `google_oauth` check that
 warns once a Testing-mode account goes 5+ days without a successful

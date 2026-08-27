@@ -12,7 +12,7 @@
  */
 
 import { CredentialError } from '../creds/errors.ts';
-import type { GoogleTokenProvider } from '../creds/providers/google.ts';
+import type { GoogleAccessProvider } from './access.ts';
 import { apiEnableLink } from '../creds/providers/google.ts';
 import { parseRetryAfterMs } from '../github-source.ts';
 import {
@@ -47,7 +47,7 @@ type ApiHint = 'gmail' | 'calendar-json' | 'people';
 /** Shared request core with auth, refresh-retry, and rate-limit handling. */
 export class GoogleApiClient {
   constructor(
-    protected readonly tokens: GoogleTokenProvider,
+    protected readonly tokens: GoogleAccessProvider,
     protected readonly fetchImpl: FetchImpl = fetch,
     public readonly log: (msg: string) => void = () => {},
     /** For the api_not_enabled deep link. */

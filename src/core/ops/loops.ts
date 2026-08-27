@@ -19,7 +19,7 @@
  */
 
 import { OperationError, type Operation, type OperationContext } from './contract.ts';
-import { sourceScopeOpts } from './context.ts';
+import { resolveRequestedScope, sourceScopeOpts } from './context.ts';
 import { validateSourceId } from '../utils.ts';
 import {
   addSuppression,
@@ -40,13 +40,13 @@ interface GoogleSourceFreshness {
 
 async function googleSourceFreshness(
   ctx: OperationContext,
+  scope: { sourceId?: string; sourceIds?: string[] },
 ): Promise<{ sources: GoogleSourceFreshness[]; stale: boolean }> {
   try {
     const rows = await ctx.engine.executeRaw<{ id: string; last_sync_at: string | null; config: unknown }>(
       `SELECT id, last_sync_at, config FROM sources WHERE archived IS NOT TRUE`,
       [],
     );
-    const scope = sourceScopeOpts(ctx);
     const sources = rows
       .filter((r) => {
         const c =
@@ -187,10 +187,21 @@ function rankGroups(groups: CounterpartyGroup[], backlinks: Map<string, number>)
   return [...groups].sort((a, b) => score(b) - score(a) || a.counterparty.localeCompare(b.counterparty));
 }
 
-function renderText(groups: CounterpartyGroup[], stale: boolean): string {
+function renderText(groups: CounterpartyGroup[], stale: boolean, noGoogleSources: boolean): string {
   const lines: string[] = [];
   if (stale) lines.push('⚠ google sources have not synced recently — this may be out of date.');
   if (groups.length === 0) {
+    if (noGoogleSources) {
+      // Trust-critical copy: on a brain whose email arrives some other way
+      // (a gateway, an agent-authored collector), "You are clean" would be a
+      // confident lie — the engine has nothing to read.
+      lines.push(
+        'No google source is connected in this scope — the open-loop engine has nothing to read, ' +
+          'so this is NOT "inbox clean". Connect one with: gbrain google setup ' +
+          '(existing gateway/CLI access works too: gbrain sources add <id> --kind google --access command|env — see docs/guides/google-connect.md).',
+      );
+      return lines.join('\n');
+    }
     lines.push('No open loops — no unanswered threads older than 24h and no tracked promises. You are clean.');
     return lines.join('\n');
   }
@@ -226,6 +237,8 @@ const open_loops: Operation = {
     counterparty: { type: 'string', description: 'Filter to one counterparty (slug or email).' },
     limit: { type: 'number', description: 'Grouped: max groups (default 3). Flat: max loops (default 50). The internal fetch is capped at 500 rows; `truncated: true` marks a hit.' },
     include_context: { type: 'boolean', description: 'Attach the counterparty entity card per group (trusted local only). Default true.' },
+    source_id: { type: 'string', description: "Scope to one source (e.g. the google source, when the caller's transport is bound elsewhere). Remote callers must hold a grant covering it." },
+    all_sources: { type: 'boolean', description: 'Trusted local: span every source in the brain. Remote callers stay inside their grant.' },
   },
   scope: 'read',
   annotations: { readOnlyHint: true },
@@ -233,7 +246,34 @@ const open_loops: Operation = {
     const trusted = ctx.remote === false;
     const groupBy = (p.group_by as string | undefined) ?? 'counterparty';
     const status = ((p.status as string | undefined) ?? 'open') as LoopStatus;
-    const scope = sourceScopeOpts(ctx);
+    // Per-call scope via the canonical trust+grant resolver: an MCP caller
+    // whose transport is bound to another source can point this read at the
+    // google source (`source_id`) or, trusted-local, span the brain
+    // (`all_sources`) — remote callers stay inside their grant and an
+    // out-of-grant source_id is denied there.
+    const scope = resolveRequestedScope(
+      ctx,
+      p.source_id as string | undefined,
+      p.all_sources === true,
+    );
+    // Tighter than the shared resolver for REMOTE callers: resolveRequestedScope
+    // honors an explicit source_id for scalar-scoped callers (its other
+    // consumers apply page-visibility filtering, so a cross-source read there
+    // exposes world rows only). Loops have NO visibility tiering — summaries
+    // derive from private email — so a remote source_id must sit inside the
+    // caller's grant, scalar or federated.
+    if (!trusted && typeof p.source_id === 'string') {
+      const allowed = ctx.auth?.allowedSources;
+      const inGrant =
+        (allowed && allowed.length > 0 && allowed.includes(p.source_id)) ||
+        (!(allowed && allowed.length > 0) && ctx.sourceId === p.source_id);
+      if (!inGrant) {
+        throw new OperationError(
+          'permission_denied',
+          `open_loops: source '${p.source_id}' is outside your granted sources`,
+        );
+      }
+    }
     // Fail-closed invariant: an untrusted caller must arrive with a resolved
     // scope. Shipped transports refuse unscoped remote calls upstream, but
     // the op must not rely on them — an unscoped remote read here would span
@@ -252,7 +292,8 @@ const open_loops: Operation = {
       ...(p.counterparty ? { counterparty: p.counterparty as string } : {}),
       limit: 500,
     });
-    const freshness = await googleSourceFreshness(ctx);
+    const freshness = await googleSourceFreshness(ctx, scope);
+    const noGoogleSources = freshness.sources.length === 0;
     const deepLinks = trusted ? await deepLinksFor(ctx, loops) : new Map<string, string>();
 
     const truncated = loops.length >= 500;
@@ -264,6 +305,7 @@ const open_loops: Operation = {
         truncated,
         stale: freshness.stale,
         sources: freshness.sources,
+        no_google_sources: noGoogleSources,
         redacted: !trusted,
       };
     }
@@ -324,8 +366,9 @@ const open_loops: Operation = {
       truncated,
       stale: freshness.stale,
       sources: freshness.sources,
+      no_google_sources: noGoogleSources,
       redacted: !trusted,
-      ...(trusted ? { text: renderText(groups, freshness.stale) } : {}),
+      ...(trusted ? { text: renderText(groups, freshness.stale, noGoogleSources) } : {}),
     };
   },
 };

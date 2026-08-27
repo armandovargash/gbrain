@@ -30,7 +30,8 @@ import { dirname, join, relative } from 'node:path';
 import type { BrainEngine } from '../engine.ts';
 import type { SyncOpts, SyncResult } from '../../commands/sync.ts';
 import { CredentialError, isCredentialError } from '../creds/errors.ts';
-import { GOOGLE_PROVIDER, GoogleTokenProvider } from '../creds/providers/google.ts';
+import { GOOGLE_PROVIDER, GoogleTokenProvider, fetchSendAsAliases } from '../creds/providers/google.ts';
+import { CommandAccessProvider, EnvAccessProvider, type GoogleAccessProvider } from './access.ts';
 import { credentialId, openVault, type CredentialEntry, type CredentialVault } from '../creds/vault.ts';
 import { createProgress, startHeartbeat } from '../progress.ts';
 import { getCliOptions, cliOptsToProgressOptions } from '../cli-options.ts';
@@ -90,7 +91,21 @@ export function parseGoogleSourceConfig(
       : 90;
   const dir =
     typeof config.g_dir === 'string' && config.g_dir.length > 0 ? config.g_dir : fallbackDir;
-  return { account, services: services.length > 0 ? services : [...ALL_GOOGLE_SERVICES], historyDays, dir };
+  const access =
+    config.g_access === 'command' || config.g_access === 'env' ? config.g_access : 'vault';
+  return {
+    account,
+    services: services.length > 0 ? services : [...ALL_GOOGLE_SERVICES],
+    historyDays,
+    dir,
+    access,
+    ...(typeof config.g_token_command === 'string' && config.g_token_command.trim()
+      ? { tokenCommand: config.g_token_command }
+      : {}),
+    ...(typeof config.g_token_env === 'string' && config.g_token_env.trim()
+      ? { tokenEnv: config.g_token_env }
+      : {}),
+  };
 }
 
 // ── State ────────────────────────────────────────────────────────────────────
@@ -811,15 +826,45 @@ export async function runGoogleSync(
       `Google source "${sourceId}" has no account configured. Re-add it: gbrain sources add ${sourceId} --kind google --account <email>`,
     );
   }
-  const vault = vaultOverride ?? openVault();
-  const entry = await vault.get(credentialId(GOOGLE_PROVIDER, cfg.account));
-  if (!entry) {
-    throw new CredentialError('not_connected', ` for ${cfg.account} — run: gbrain google connect --account ${cfg.account}`);
-  }
   const log = (msg: string): void => {
     process.stderr.write(msg + '\n');
   };
-  const tokens = new GoogleTokenProvider(vault, entry.id, fetchImpl ?? fetch);
+  // Access resolution: the vault is the default; command/env modes let a
+  // stack that already holds Google access (gog, gcloud, a credential
+  // gateway) drive this source without gbrain's own OAuth flow. Non-vault
+  // modes synthesize a minimal identity entry: no meta.scopes (so the scope
+  // preflight below trusts cfg.services), no sendas_aliases (best-effort
+  // live fetch below), account from the source config.
+  let entry: CredentialEntry;
+  let tokens: GoogleAccessProvider;
+  if (cfg.access === 'command' || cfg.access === 'env') {
+    tokens =
+      cfg.access === 'command'
+        ? new CommandAccessProvider(cfg.tokenCommand ?? '')
+        : new EnvAccessProvider(cfg.tokenEnv ?? '');
+    entry = {
+      id: credentialId(GOOGLE_PROVIDER, cfg.account),
+      provider: GOOGLE_PROVIDER,
+      kind: 'bearer',
+      client_ref: 'byo',
+      secret: {},
+      meta: { account: cfg.account, connected_at: new Date().toISOString() },
+    };
+    try {
+      // sendAs aliases sharpen "is this message mine" (loop direction). The
+      // token may not carry the settings scope — degrade to account-only.
+      const aliases = await fetchSendAsAliases(await tokens.getAccessToken(), fetchImpl ?? fetch);
+      if (aliases.length > 0) entry.meta.sendas_aliases = aliases;
+    } catch { /* account-only identity */ }
+  } else {
+    const vault = vaultOverride ?? openVault();
+    const vaultEntry = await vault.get(credentialId(GOOGLE_PROVIDER, cfg.account));
+    if (!vaultEntry) {
+      throw new CredentialError('not_connected', ` for ${cfg.account} — run: gbrain google connect --account ${cfg.account}`);
+    }
+    entry = vaultEntry;
+    tokens = new GoogleTokenProvider(vault, entry.id, fetchImpl ?? fetch);
+  }
   const clientArgs = [tokens, fetchImpl ?? fetch, log, entry.meta.client_id] as const;
   const gmail = new GmailClient(...clientArgs);
   const calendar = new CalendarClient(...clientArgs);

@@ -943,6 +943,168 @@ describe('google-source materialize', () => {
     }
   });
 
+  test('command-mode access: sweep succeeds with NO vault entry; threads import and loop detection runs on the account-only identity', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'gsrc-cmdaccess-'));
+    const fx = emptyFx();
+    gmailFixture(fx);
+    try {
+      await insertGoogleSource(dir);
+      await withHome(async () => {
+        // g_access/g_token_command map through parseGoogleSourceConfig.
+        const cfg = parseGoogleSourceConfig(
+          {
+            kind: 'google',
+            g_account: 'a@example.com',
+            g_services: 'gmail',
+            g_history_days: 90,
+            g_dir: dir,
+            g_access: 'command',
+            g_token_command: 'echo fixture-token',
+          },
+          dir,
+        );
+        expect(cfg.access).toBe('command');
+        expect(cfg.tokenCommand).toBe('echo fixture-token');
+
+        // Every API call carries the command-minted bearer; NO vault is
+        // passed (vaultOverride undefined) and no refresh POST ever fires —
+        // the command IS the refresher.
+        const inner = buildFetch(fx);
+        const authHeaders: string[] = [];
+        const spyFetch: FetchImpl = async (url, init) => {
+          const h = (init?.headers ?? {}) as Record<string, string>;
+          const auth = h.authorization ?? h.Authorization;
+          if (auth) authHeaders.push(auth);
+          return inner(url, init);
+        };
+        const res = await runGoogleSync(
+          engine,
+          'gsrc',
+          cfg,
+          { sourceId: 'gsrc', noEmbed: true, noExtract: true },
+          spyFetch,
+        );
+        expect(res.status).toBe('first_sync');
+        expect(fx.tokenPosts).toBe(0);
+        expect(authHeaders.length).toBeGreaterThan(0);
+        for (const a of authHeaders) expect(a).toBe('Bearer fixture-token');
+
+        // Threads imported (noise excluded), same as vault mode.
+        const emails = await slugsWhere(`slug LIKE 'emails/%'`);
+        expect(emails.length).toBe(2);
+
+        // Loop detection ran with myAddresses = account-only (the fake API
+        // serves no sendAs endpoint; fetchSendAsAliases degrades to []):
+        // T_A's SENT reply from a@example.com still reads as mine, so only
+        // T_B's 3-day-old inbound opens a loop.
+        const loops = await engine.executeRaw<{ loop_type: string; status: string; counterparty_email: string }>(
+          `SELECT loop_type, status, counterparty_email FROM open_loops WHERE source_id = 'gsrc'`,
+        );
+        expect(loops.length).toBe(1);
+        expect(loops[0].loop_type).toBe('unanswered_inbound');
+        expect(loops[0].status).toBe('open');
+        expect(loops[0].counterparty_email).toBe('dana@example.com');
+
+        // gmail sweep succeeded → the trust-critical freshness stamp landed.
+        const row = await engine.executeRaw<{ last_sync_at: unknown }>(
+          `SELECT last_sync_at FROM sources WHERE id = 'gsrc'`,
+        );
+        expect(row[0].last_sync_at).not.toBeNull();
+        expect(readGoogleState(dir).gmail_backfill_done).toBe(true);
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('env-mode access: sweep succeeds when the var is set; unset var → partial with access_env_missing on stderr and NO freshness stamp', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'gsrc-envaccess-'));
+    const fx = emptyFx();
+    gmailFixture(fx);
+    const ENV_KEY = 'GBRAIN_TEST_GSYNC_ACCESS_TOKEN';
+    const cfg = () =>
+      parseGoogleSourceConfig(
+        {
+          kind: 'google',
+          g_account: 'a@example.com',
+          g_services: 'gmail',
+          g_history_days: 90,
+          g_dir: dir,
+          g_access: 'env',
+          g_token_env: ENV_KEY,
+        },
+        dir,
+      );
+    const stderrCaptured = async (fn: () => Promise<void>): Promise<string> => {
+      const orig = process.stderr.write.bind(process.stderr);
+      const chunks: string[] = [];
+      process.stderr.write = ((chunk: string | Uint8Array): boolean => {
+        chunks.push(typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf-8'));
+        return true;
+      }) as typeof process.stderr.write;
+      try {
+        await fn();
+      } finally {
+        process.stderr.write = orig;
+      }
+      return chunks.join('');
+    };
+    try {
+      await insertGoogleSource(dir);
+      await withHome(async () => {
+        expect(cfg().access).toBe('env');
+        expect(cfg().tokenEnv).toBe(ENV_KEY);
+
+        // (a) Unset var: the sweep FAILS honestly. Current behavior (pinned):
+        // the CredentialError surfaces per-service inside runGoogleSync (the
+        // same catch that handles scope_missing/upstream credential errors) —
+        // status 'partial', toHuman() on stderr, nothing imported, and the
+        // staleness-gate stamp is withheld.
+        await withEnv({ [ENV_KEY]: undefined }, async () => {
+          let res: Awaited<ReturnType<typeof runGoogleSync>> | undefined;
+          const err = await stderrCaptured(async () => {
+            res = await runGoogleSync(
+              engine,
+              'gsrc',
+              cfg(),
+              { sourceId: 'gsrc', noEmbed: true, noExtract: true },
+              buildFetch(fx),
+            );
+          });
+          expect(res!.status).toBe('partial');
+          expect(res!.added).toBe(0);
+          expect(err).toContain('token environment variable is empty');
+          expect(err).toContain(`$${ENV_KEY}`);
+          const row = await engine.executeRaw<{ last_sync_at: unknown }>(
+            `SELECT last_sync_at FROM sources WHERE id = 'gsrc'`,
+          );
+          expect(row[0].last_sync_at).toBeNull(); // stale gate stays honest
+          expect((await slugsWhere(`slug LIKE 'emails/%'`)).length).toBe(0);
+        });
+
+        // (b) Var set: the same source syncs end-to-end, no vault involved.
+        await withEnv({ [ENV_KEY]: 'env-token-abc123' }, async () => {
+          const res = await runGoogleSync(
+            engine,
+            'gsrc',
+            cfg(),
+            { sourceId: 'gsrc', noEmbed: true, noExtract: true },
+            buildFetch(fx),
+          );
+          expect(res.status).toBe('first_sync');
+          expect(fx.tokenPosts).toBe(0);
+          expect((await slugsWhere(`slug LIKE 'emails/%'`)).length).toBe(2);
+          const row = await engine.executeRaw<{ last_sync_at: unknown }>(
+            `SELECT last_sync_at FROM sources WHERE id = 'gsrc'`,
+          );
+          expect(row[0].last_sync_at).not.toBeNull();
+        });
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test('loops_extract enqueue: recent threads get idempotency-keyed jobs; unchanged re-sweeps add no duplicates', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'gsrc-extract-'));
     const fx = emptyFx();

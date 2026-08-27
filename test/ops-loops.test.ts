@@ -420,6 +420,176 @@ describe('open_loops group_by none (flat)', () => {
   });
 });
 
+describe('open_loops no_google_sources honesty', () => {
+  test('scope with NO google source + zero loops → no_google_sources:true and the honest "nothing to read" digest, never "You are clean"', async () => {
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, config) VALUES ('plain', 'plain', '{}'::jsonb)
+       ON CONFLICT (id) DO NOTHING`,
+    );
+    const res = (await openLoopsOp.handler(ctx({ sourceId: 'plain' }), {})) as GroupsResult & {
+      no_google_sources: boolean;
+    };
+    expect(res.groups).toEqual([]);
+    expect(res.no_google_sources).toBe(true);
+    expect(res.text).toContain('No google source is connected');
+    expect(res.text).not.toContain('You are clean');
+    // The empty-scope freshness set must not read as stale either.
+    expect(res.sources).toEqual([]);
+    expect(res.stale).toBe(false);
+  });
+
+  test('no_google_sources reflects the SOURCES in scope, not the loop count: loops in a non-google source still set it true', async () => {
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, config) VALUES ('plain', 'plain', '{}'::jsonb)
+       ON CONFLICT (id) DO NOTHING`,
+    );
+    await upsertOpenLoop(engine, loop({ sourceId: 'plain' }));
+    const res = (await openLoopsOp.handler(ctx({ sourceId: 'plain' }), {})) as GroupsResult & {
+      no_google_sources: boolean;
+    };
+    expect(res.groups).toHaveLength(1);
+    expect(res.no_google_sources).toBe(true);
+    // Non-empty groups render the normal digest; the flag stays for callers.
+    expect(res.text).toContain('waiting on you');
+  });
+
+  test('google source present + zero loops → no_google_sources:false and "You are clean"', async () => {
+    const res = (await openLoopsOp.handler(ctx(), {})) as GroupsResult & {
+      no_google_sources: boolean;
+    };
+    expect(res.no_google_sources).toBe(false);
+    expect(res.text).toContain('You are clean');
+    expect(res.text).not.toContain('No google source is connected');
+  });
+});
+
+describe('open_loops per-call scope (source_id / all_sources)', () => {
+  interface FlatResult {
+    loops: Array<{ counterparty_email: string | null }>;
+    count: number;
+    sources: Array<{ id: string }>;
+    redacted: boolean;
+  }
+
+  async function seedTwoGoogleSources(): Promise<void> {
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, config, last_sync_at)
+       VALUES ('g2', 'g2', '{"kind":"google"}'::jsonb, now())
+       ON CONFLICT (id) DO NOTHING`,
+    );
+    await upsertOpenLoop(
+      engine,
+      loop({ threadId: '18c2f4a9b3d21e01', counterpartyEmail: 'alice@example.com' }),
+    ); // g1
+    await upsertOpenLoop(
+      engine,
+      loop({ sourceId: 'g2', threadId: '18c2f4a9b3d21e02', counterpartyEmail: 'eve@example.com' }),
+    );
+  }
+
+  test('trusted local source_id narrows to that source (loops AND freshness)', async () => {
+    await seedTwoGoogleSources();
+    const res = (await openLoopsOp.handler(ctx(), {
+      source_id: 'g2',
+      group_by: 'none',
+    })) as FlatResult;
+    expect(res.count).toBe(1);
+    expect(res.loops[0].counterparty_email).toBe('eve@example.com');
+    expect(res.sources.map((s) => s.id)).toEqual(['g2']);
+    expect(res.redacted).toBe(false);
+  });
+
+  test('remote out-of-grant source_id → permission_denied, nothing returned', async () => {
+    await seedTwoGoogleSources();
+    await expect(
+      openLoopsOp.handler(
+        ctx({
+          remote: true,
+          sourceId: undefined,
+          auth: { token: 't', clientId: 'c', scopes: ['read'], allowedSources: ['g1'] },
+        }),
+        { source_id: 'g2', group_by: 'none' },
+      ),
+    ).rejects.toThrow(/outside your granted sources/);
+  });
+
+  test('remote SCALAR-scoped caller: source_id outside the scalar grant → permission_denied; same-source allowed', async () => {
+    // Tighter than the shared resolveRequestedScope (whose other consumers
+    // apply page-visibility filtering): loop summaries derive from private
+    // email, so a scalar-scoped remote caller must not widen via source_id.
+    await seedTwoGoogleSources();
+    await expect(
+      openLoopsOp.handler(
+        ctx({ remote: true, sourceId: 'g1' }),
+        { source_id: 'g2', group_by: 'none' },
+      ),
+    ).rejects.toThrow(/outside your granted sources/);
+    const same = (await openLoopsOp.handler(
+      ctx({ remote: true, sourceId: 'g1' }),
+      { source_id: 'g1', group_by: 'none' },
+    )) as { count: number; redacted: boolean };
+    expect(same.redacted).toBe(true);
+    expect(same.count).toBeGreaterThanOrEqual(0);
+  });
+
+  test('remote source_id INSIDE the grant narrows to it (redacted)', async () => {
+    await seedTwoGoogleSources();
+    const res = (await openLoopsOp.handler(
+      ctx({
+        remote: true,
+        sourceId: undefined,
+        auth: { token: 't', clientId: 'c', scopes: ['read'], allowedSources: ['g1', 'g2'] },
+      }),
+      { source_id: 'g2', group_by: 'none' },
+    )) as FlatResult;
+    expect(res.count).toBe(1);
+    expect(res.loops[0].counterparty_email).toBe('eve@example.com');
+    expect(res.sources.map((s) => s.id)).toEqual(['g2']);
+    expect(res.redacted).toBe(true);
+    expect(JSON.stringify(res)).not.toContain('"quote"');
+  });
+
+  test('all_sources trusted local spans the whole brain', async () => {
+    await seedTwoGoogleSources();
+    const res = (await openLoopsOp.handler(ctx(), {
+      all_sources: true,
+      group_by: 'none',
+    })) as FlatResult;
+    expect(res.count).toBe(2);
+    expect(res.loops.map((l) => l.counterparty_email).sort()).toEqual([
+      'alice@example.com',
+      'eve@example.com',
+    ]);
+    expect(res.sources.map((s) => s.id).sort()).toEqual(['g1', 'g2']);
+  });
+
+  test('all_sources from a remote caller stays inside its grant', async () => {
+    await seedTwoGoogleSources();
+    const res = (await openLoopsOp.handler(
+      ctx({
+        remote: true,
+        sourceId: undefined,
+        auth: { token: 't', clientId: 'c', scopes: ['read'], allowedSources: ['g1'] },
+      }),
+      { all_sources: true, group_by: 'none' },
+    )) as FlatResult;
+    expect(res.count).toBe(1);
+    expect(res.loops[0].counterparty_email).toBe('alice@example.com');
+    expect(res.sources.map((s) => s.id)).toEqual(['g1']);
+    expect(res.redacted).toBe(true);
+  });
+
+  test('all_sources from a remote caller with NO grant fail-closes (permission_denied)', async () => {
+    await seedTwoGoogleSources();
+    await expect(
+      openLoopsOp.handler(ctx({ remote: true, sourceId: undefined }), {
+        all_sources: true,
+        group_by: 'none',
+      }),
+    ).rejects.toThrow(/resolved source scope/);
+  });
+});
+
 describe('loops_close', () => {
   test('closes an open loop; the second close reports not_found_or_already_closed', async () => {
     const { id } = await upsertOpenLoop(engine, loop());
