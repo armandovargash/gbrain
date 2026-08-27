@@ -197,6 +197,32 @@ describe('meta-hook cache hygiene (bounded, expired-entry eviction)', () => {
     } as unknown as BrainEngine;
   }
 
+  test('the cache never crosses ENGINES: same (source, tier, session, allow-list), different engine, different payload', async () => {
+    // The CI-shard leak this pins: the cache is process-global while engines
+    // are per-brain — before the engine-id key segment, suite A's facts were
+    // served into suite B's `_meta.brain_hot_memory` whenever both used
+    // source 'default' with a null session inside one TTL window.
+    const factRow = (fact: string) => ({
+      id: 1, fact, kind: 'fact', notability: 'medium', entity_slug: 'people/x',
+      visibility: 'world', confidence: 1, valid_from: new Date(), created_at: new Date(),
+      context: null,
+    });
+    const engineA = {
+      listFactsBySession: async () => [],
+      listFactsSince: async () => [factRow('engine A fact')],
+    } as unknown as BrainEngine;
+    const engineB = {
+      listFactsBySession: async () => [],
+      listFactsSince: async () => [factRow('engine B fact')],
+    } as unknown as BrainEngine;
+
+    const a = await getBrainHotMemoryMeta('get_stats', ctx({ engine: engineA }));
+    const b = await getBrainHotMemoryMeta('get_stats', ctx({ engine: engineB }));
+    expect(JSON.stringify(a)).toContain('engine A fact');
+    expect(JSON.stringify(b)).toContain('engine B fact');
+    expect(JSON.stringify(b)).not.toContain('engine A fact'); // pre-fix: B served A's cached payload
+  });
+
   test('expired entry is evicted on read-miss even when the rebuild fails', async () => {
     await engine.insertFact(
       { fact: 'expiry-evict seed', kind: 'fact', entity_slug: 'expiry-evict', visibility: 'world', source: 'test' },
@@ -210,11 +236,20 @@ describe('meta-hook cache hygiene (bounded, expired-entry eviction)', () => {
 
     // Rebuild path throws (dispatch absorbs this in production). The expired
     // entry must NOT survive the failed rebuild — delete happens on read-miss.
-    const boomEngine = {
-      listFactsBySession: async () => { throw new Error('boom'); },
-      listFactsSince: async () => { throw new Error('boom'); },
-    } as unknown as BrainEngine;
-    await expect(getBrainHotMemoryMeta('get_stats', ctx({ engine: boomEngine }))).rejects.toThrow('boom');
+    // The rebuild must come from the SAME engine object: the cache key folds
+    // engine identity (a different engine is a different key by design and
+    // could never read-miss this entry), so the failure is injected by
+    // patching the warm engine's methods rather than swapping engines.
+    const origBySession = engine.listFactsBySession;
+    const origSince = engine.listFactsSince;
+    try {
+      engine.listFactsBySession = async () => { throw new Error('boom'); };
+      engine.listFactsSince = async () => { throw new Error('boom'); };
+      await expect(getBrainHotMemoryMeta('get_stats', ctx())).rejects.toThrow('boom');
+    } finally {
+      engine.listFactsBySession = origBySession;
+      engine.listFactsSince = origSince;
+    }
     expect(cache.size).toBe(0);
   });
 
