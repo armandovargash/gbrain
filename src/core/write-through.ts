@@ -221,16 +221,20 @@ export type PageWriteTarget =
  * read as stale and sweep the page while its file is still on disk.
  */
 function scannerSourcePath(scanRoot: string, filePath: string): string {
+  // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal -- scanRoot is the operator-written sources.local_path / sync.repo_path config root; canonicalizing it here mints no fs read/write path
   const absRoot = resolve(scanRoot);
   let cursor = absRoot;
   while (true) {
+    // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal -- cursor only walks UP (dirname) from the operator-config root joined with the literal '.git' segment; existsSync boolean probe, no content ever read or served
     if (existsSync(join(cursor, '.git'))) {
+      // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal -- filePath was proven inside writeRoot by isWriteTargetContained before the sole call site (resolvePageWriteTarget); output is an in-memory source_path string, not an fs operand
       return relative(cursor, resolve(filePath)).replaceAll('\\', '/');
     }
     const parent = dirname(cursor);
     if (parent === cursor) break;
     cursor = parent;
   }
+  // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal -- same: containment-checked filePath relative to the operator-config root, string minting only
   return relative(absRoot, resolve(filePath)).replaceAll('\\', '/');
 }
 
