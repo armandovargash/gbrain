@@ -1,4 +1,4 @@
-<!-- gbrain-runbook-stamp: 0.46.33.0 -->
+<!-- gbrain-runbook-stamp: 0.46.35.0 -->
 <!-- This stamp must equal the VERSION file at every release; CI enforces it
      (scripts/check-bootstrap-tag.sh). `gbrain bootstrap status` compares it to
      the installed binary and warns on skew. -->
@@ -89,7 +89,20 @@ registration only with `--mcp-even-if-plugin`.
    `gh auth login -h github.com -p https -w` (you run it; they click Authorize).
    Then `gbrain bootstrap status` — it is idempotent and resume-aware; after any
    partial failure, re-run it and continue where it points.
-2. **Engine.** `gbrain init --pglite` (2 seconds, no server). Search mode is
+2. **Engine.** Two lanes; default to the first:
+   - **PGLite (default):** `gbrain init --pglite` (2 seconds, no server). This is
+     the lane that keeps the per-turn hook context injection working — the hook
+     IPC listener is PGLite-only today.
+   - **Postgres-first (harness installs):** `gbrain init --prefer-postgres` walks
+     a 5-rung ladder (env URL → Supabase token discovery → local Postgres →
+     `--allow-docker` → PGLite floor) for installs that want concurrent
+     connections or multi-machine access. Tradeoff, stated plainly: a Postgres
+     brain gets MCP tools every session plus the pull protocol, but gives up the
+     per-turn hook lane until the engine-uniform listener lands (the degradation
+     matrix in `docs/guides/bootstrap.md` carries the row; INSTALL_FOR_AGENTS.md
+     "Engine preference for harness installs" carries the ladder detail).
+
+   Search mode is
    auto-selected silently (conservative when keyless, tokenmax with an
    expansion key) and printed with an `[AGENT]` cost matrix — surface that
    matrix to the human and confirm before running high-volume queries (see
@@ -140,17 +153,12 @@ registration only with `--mcp-even-if-plugin`.
      `--no-hooks`, or `gbrain bootstrap uninstall`). MCP scope is NOT asked here —
      `hooks` consumes the MCP_SCOPE answer recorded during the interview.
    - Codex: registers MCP (`codex mcp add`) and relies on the AGENTS.md protocol —
-     say plainly that Codex gets pull-based context, not per-turn push. It ALSO
-     installs a SessionEnd capture hook (user-global `hooks.json` + a config.toml
-     trust entry — codex hooks are silently inert without the trust pair), consent-
-     gated the same way as Claude hooks (`--no-hooks` opts out; `GBRAIN_HOOKS=0`
-     disables at runtime). Tell the human the hook is machine-global: every codex
-     session on this machine gets session-end capture, not just this repo.
+     say plainly that Codex gets pull-based context, not per-turn push.
      Do NOT offer an MCP scope choice: `codex mcp add` has no scope flag, so
      the registration is always user-global. State it as fact — any repo opened
      on this machine can reach the brain (read and write) through its MCP
      tools; the off-ramps are `codex mcp remove gbrain` (registration only) or
-     `gbrain bootstrap uninstall` (full teardown, hooks included).
+     `gbrain bootstrap uninstall` (full teardown).
    - opencode: writes the MCP entry directly into opencode's JSONC config (no
      CLI exec needed) and relies on the AGENTS.md protocol, which opencode loads
      natively — say plainly that opencode gets pull-based context, not per-turn
