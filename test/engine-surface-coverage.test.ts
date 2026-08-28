@@ -79,8 +79,9 @@ const INTERFACE_METHODS: readonly string[] = [
   'addTakesBatch', 'listTakes', 'searchTakes', 'searchTakesVector', 'getTakeEmbeddings',
   'countStaleTakes', 'listStaleTakes', 'updateTake', 'supersedeTake', 'resolveTake',
   'getScorecard', 'getCalibrationCurve', 'addSynthesisEvidence',
-  // Dream verdicts
-  'getDreamVerdict', 'putDreamVerdict',
+  // Dream verdicts (sweepDreamVerdicts: wave-k #4069 TTL housekeeping,
+  // covered by test/dream-verdict-cache-ttl.test.ts)
+  'getDreamVerdict', 'putDreamVerdict', 'sweepDreamVerdicts',
   // Contradiction probe
   'listActiveTakesForPages', 'writeContradictionsRun', 'loadContradictionsTrend',
   'getContradictionCacheEntry', 'putContradictionCacheEntry', 'sweepContradictionCache',

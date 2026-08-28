@@ -75,6 +75,7 @@ export function scoreCorpus(corpus: CorpusCase[], predictions: CasePrediction[])
     const claims = pred.claims;
 
     for (const forbidRe of c.forbid) {
+      // nosemgrep: javascript.lang.security.audit.detect-non-literal-regexp.detect-non-literal-regexp -- the pattern comes from the COMMITTED corpus (evals/takes-bootstrap/corpus.jsonl, reviewed in PRs and validated by test/eval-takes-bootstrap.test.ts's regex-compiles check), never from runtime user input; the eval harness is an offline instrument
       const re = new RegExp(forbidRe, 'i');
       for (const cl of claims) {
         if (re.test(cl.claim)) forbidViolations.push({ id: c.id, forbid_re: forbidRe, claim: cl.claim });
@@ -84,6 +85,7 @@ export function scoreCorpus(corpus: CorpusCase[], predictions: CasePrediction[])
     for (const e of c.expected) {
       const t = tally.get(e.kind)!;
       t.expected += 1;
+      // nosemgrep: javascript.lang.security.audit.detect-non-literal-regexp.detect-non-literal-regexp -- corpus-committed pattern, same rationale as the forbid loop above
       const re = new RegExp(e.claim_re, 'i');
       const hit = claims.some(cl =>
         cl.kind === e.kind && re.test(cl.claim) && cl.weight >= e.weight_min && cl.weight <= e.weight_max,
@@ -99,6 +101,7 @@ export function scoreCorpus(corpus: CorpusCase[], predictions: CasePrediction[])
       // Precision credit: matches any expected of the same kind by regex
       // (weight range NOT required for precision — a right claim with an
       // off-range weight is a recall miss, not a hallucination).
+      // nosemgrep: javascript.lang.security.audit.detect-non-literal-regexp.detect-non-literal-regexp -- corpus-committed pattern, same rationale as the forbid loop above
       const ok = c.expected.some(e => e.kind === kind && new RegExp(e.claim_re, 'i').test(cl.claim));
       if (ok) t.precise += 1;
     }
