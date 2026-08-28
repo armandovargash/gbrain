@@ -12,14 +12,24 @@ file, the workflow pins, and the affected assertions together.
   version stamp; CI installs the RELEASE TAG `v2026.8.3` = commit `3c27eb62` — the two
   differ by post-release main commits, same declared version. If a CI door run ever
   diverges from these notes, re-observe against the tag checkout.)
-- Installer sha256: `c0380bc1f78d3d662a77663ce20cc17e14cbc4bec35e61ab7a33bac5f3afed2d`
-  (refreshed 2026-08-25: upstream installer drifted again past the 2026-08-15
-  pin — reviewed the fetched script in full: the `--branch`/`--commit`/
-  `--force-commit` payload-pin flags the door depends on are intact, the
-  outbound host set is the expected toolchain (github, nousresearch, astral/uv,
-  nodejs, pypi, npmmirror), no eval/base64 obfuscation, sudo limited to distro
-  git/package installs; the payload pins (tag+commit) are unchanged, so the
-  installed CODE was never unpinned — only the bootstrap script moved)
+- Installer sha256: `4b5839eb4f7cf4775108bcda6345a8de7766898ac4b4bbcafb5b0374f65603e3`
+  (refreshed 2026-08-28: upstream drifted again past the 2026-08-25 pin —
+  reviewed in full, all 3,639 lines: the `--skip-setup`/`--non-interactive`/
+  `--branch`/`--commit`/`--force-commit` flags the door depends on are intact
+  and unknown flags hard-fail (`exit 1`, so a dropped flag can never silently
+  skip the pin); outbound hosts remain the expected toolchain (github,
+  nousresearch, astral/uv, nodejs.org, pypi, npmmirror; plus a HEAD-only
+  duckduckgo connectivity probe); no eval/base64 obfuscation; sudo limited to
+  distro package installs (the one setuid chrome-sandbox sudo is
+  desktop-build-only, never in the door path); payload pins (tag+commit)
+  unchanged. KNOWN SURFACE, now REMOVED from the door: the computer-use
+  sub-installer pipes trycua/cua's installer from raw.githubusercontent.com
+  at unpinned `main` to bash — the door now passes `--skip-browser
+  --skip-computer-use`, so no unpinned code runs in CI. Behavioral notes:
+  non-root layout still `~/.hermes/hermes-agent` (root installs now use
+  FHS `/usr/local/lib/hermes-agent` — the door's runners are non-root);
+  npm-dep failures now abort the install, absorbed by the door's 3-attempt
+  retry; managed Node is now v26.)
   (download https://hermes-agent.nousresearch.com/install.sh to a file first; verify; then run)
 - Installer flags used: `--skip-setup --non-interactive`; binary lands at `~/.local/bin/hermes`
 - Python 3.11.15 via uv

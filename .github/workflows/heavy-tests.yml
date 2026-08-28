@@ -210,7 +210,7 @@ jobs:
       HERMES_VERSION: "0.20.0"
       HERMES_GIT_TAG: "v2026.8.3"
       HERMES_GIT_COMMIT: "3c27eb6234bf91b8ceee9e9071591b31e9b148cb"
-      HERMES_INSTALL_SHA256: "c0380bc1f78d3d662a77663ce20cc17e14cbc4bec35e61ab7a33bac5f3afed2d"
+      HERMES_INSTALL_SHA256: "4b5839eb4f7cf4775108bcda6345a8de7766898ac4b4bbcafb5b0374f65603e3"
       GBRAIN_REAL_HERMES_E2E: '1'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
@@ -251,7 +251,13 @@ jobs:
             exit 1
           fi
           for attempt in 1 2 3; do
-            if timeout 600 bash hermes-install.sh --skip-setup --non-interactive --branch "$HERMES_GIT_TAG" --commit "$HERMES_GIT_COMMIT"; then
+            # --skip-browser --skip-computer-use: neither is needed by the
+            # door, and the computer-use sub-installer pipes an UNPINNED
+            # third-party script from raw.githubusercontent.com to bash — the
+            # one part of the install the sha256 + tag/commit pins don't
+            # cover. Skipping removes that surface entirely (review record in
+            # docs/mcp/HERMES-CLI-PIN.md).
+            if timeout 600 bash hermes-install.sh --skip-setup --non-interactive --skip-browser --skip-computer-use --branch "$HERMES_GIT_TAG" --commit "$HERMES_GIT_COMMIT"; then
               # The branch/commit flags above are ASSERTED here, not trusted:
               # a shell installer that silently ignores unknown flags would
               # clone upstream main into a runner that later holds secrets.
