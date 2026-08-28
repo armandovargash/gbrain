@@ -92,7 +92,22 @@ export const E2E_TEST_MAP: Record<string, string[]> = {
   ],
   // #3390: runSchemaTransition's DDL path + the stale predicates behave
   // differently on real pgvector than on PGLite.
-  "src/core/embedding-migration.ts": ["test/e2e/migrate-embeddings-postgres.test.ts"],
+  // The voyage-wire E2E drives the same migration through the real CLI over
+  // Voyage's actual wire dialect (voyageCompatFetch), which no seam-stubbed
+  // test exercises.
+  "src/core/embedding-migration.ts": [
+    "test/e2e/migrate-embeddings-postgres.test.ts",
+    "test/e2e/migrate-embeddings-voyage-wire.serial.test.ts",
+  ],
+  "src/commands/migrate-embeddings.ts": [
+    "test/e2e/migrate-embeddings-voyage-wire.serial.test.ts",
+  ],
+  "src/core/ai/defaults.ts": [
+    "test/e2e/migrate-embeddings-voyage-wire.serial.test.ts",
+  ],
+  "src/core/ai/recipes/voyage.ts": [
+    "test/e2e/migrate-embeddings-voyage-wire.serial.test.ts",
+  ],
   "src/core/retrieval-upgrade-planner.ts": ["test/e2e/migrate-embeddings-postgres.test.ts"],
   "src/commands/extract.ts": ["test/e2e/multi-source-bug-class.test.ts"],
   "src/commands/migrate-engine.ts": [
