@@ -815,12 +815,13 @@ export async function listSources(
   // who shouldn't see soft-deleted state. Filter at the SQL level so the
   // archived rows never reach the wire by default.
   //
-  // #4433: `allowedSourceIds` row-filters to the caller's source grant —
+  // #4433: `allowedSourceIds` row-filters to the caller's source scope —
   // a scoped remote MCP caller must not enumerate other sources' ids,
   // local_paths, or remote_urls. Row-filter (not field redaction) so
-  // out-of-grant rows never reach the wire; undefined = unscoped (trusted
-  // local CLI, or a remote caller with no source grant — matching the
-  // fail-open posture of every other unscoped read).
+  // out-of-scope rows never reach the wire; an explicit empty array matches
+  // nothing (fail-closed); undefined = unscoped (trusted local CLI and
+  // internal callers — since wave-L, remote scalar/no-grant callers pass
+  // their resolved scope here too instead of arriving unscoped).
   const conds: string[] = [];
   const params: unknown[] = [];
   if (!opts.includeArchived) conds.push('archived IS NOT TRUE');
