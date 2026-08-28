@@ -2,6 +2,46 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.47.5.0] - 2026-08-28
+
+**A small fix wave: two verified community fixes, plus wire-level proof that
+the embedding sunset migration works end to end.**
+
+- **`gbrain extract --explain <kind> --json` no longer crashes on large
+  brains.** Rollup counters that arrive from the database as bigints are now
+  coerced before serialization, and the four numeric fields match the shapes
+  `extract status --json` and doctor already use. Contributed by
+  @Masashi-Ono0611 (#4579), with a test that fails without the fix.
+
+- **Sync rename handling is back behind the guarded resolver.** When a rename
+  lands in your source repo, the old page's slug resolution now routes through
+  the same origin-checked resolver the delete lane uses, on both the batched
+  and per-path lanes — a page whose recorded origin is a different source is
+  skipped and reconciled instead of being repointed. This restores a
+  protection that a recent wave had dropped from the rename lane. Contributed
+  by @Masashi-Ono0611 (#4627), with regression tests that reproduce the
+  pre-fix behavior.
+
+- **The ZeroEntropy sunset migration is now pinned by a real-wire E2E.** The
+  exact command every legacy `zeroentropyai:zembed-1` brain must run before
+  the provider's 2026-09-04 shutdown — `gbrain migrate embeddings --to
+  voyage:voyage-4 --dim 1024` — is exercised end to end through the real CLI
+  against a server speaking Voyage's actual wire dialect (base64 embeddings,
+  `output_dimension`, `/rerank`), covering all three vector planes, the
+  post-migration query cache, and the reranker companion. The keep-width
+  OpenAI alternative (`--to openai:text-embedding-3-small --dim 1280`) is
+  covered too, including the no-reranker guidance path.
+
+## To take advantage of v0.47.5.0
+
+`gbrain upgrade` is all you need — there are no schema migrations and no
+manual steps in this release.
+
+**Say to your agent:** *"upgrade gbrain"* — and if you're still on the
+ZeroEntropy embedding provider: *"migrate my brain off zeroentropy before the
+September shutdown"* (your agent runs `gbrain migrate embeddings --to
+voyage:voyage-4 --dim 1024 --dry-run` first to preview cost).
+
 ## [0.47.4.0] - 2026-08-28
 
 **Your brain's remote surface now behaves the same everywhere: reads stay
