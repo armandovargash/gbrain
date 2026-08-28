@@ -155,6 +155,11 @@ const LEDGER: Record<string, string> = {
   pause_job: 'test/jobs-lifecycle-ops.test.ts',
   resume_job: 'test/jobs-lifecycle-ops.test.ts',
   replay_job: 'test/jobs-lifecycle-ops.test.ts',
+  // v0.47.0.0 gmail open-loop engine (mapped at the second master merge):
+  // the ops suite covers remote posture, grant denial, and redaction arms.
+  open_loops: 'test/ops-loops.test.ts',
+  loops_close: 'test/ops-loops.test.ts',
+  loops_mute: 'test/ops-loops.test.ts',
   // v0.46.28.0+ master-wave ops, mapped at the test-gap-wave master merge.
   fetch: 'test/deep-research-fetch.test.ts',
   get_usage: 'test/chat-usage.test.ts',
