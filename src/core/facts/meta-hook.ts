@@ -37,25 +37,6 @@ interface CacheEntry {
 
 const _cache = new Map<string, CacheEntry>();
 
-/** Engine-identity key segment. The cache is process-global while engines are
- * per-brain — without this, two engines sharing (source, tier, session,
- * allow-list) serve each other's cached facts: observed as a cross-suite leak
- * in CI shard runs (one suite's `_meta.brain_hot_memory` carried another
- * suite's seeded facts), and the same shape would bite any future
- * multi-engine process. WeakMap so the id mapping can never pin an engine;
- * stale entries for a collected engine age out via TTL + the size bound. */
-const _engineIds = new WeakMap<object, number>();
-let _nextEngineId = 1;
-function engineCacheId(engine: unknown): string {
-  if (typeof engine !== 'object' || engine === null) return 'none';
-  let id = _engineIds.get(engine);
-  if (id === undefined) {
-    id = _nextEngineId++;
-    _engineIds.set(engine, id);
-  }
-  return String(id);
-}
-
 /** Bounded set: evict the oldest-expiry entry when inserting at capacity. */
 function cacheSet(key: string, entry: CacheEntry): void {
   if (!_cache.has(key) && _cache.size >= HOT_MEMORY_CACHE_MAX_ENTRIES) {
@@ -109,9 +90,12 @@ export async function getBrainHotMemoryMeta(
   // encodeCacheField (F5): source_id / session_id are caller-controlled and
   // may contain the '::' delimiter; percent-encode ':' so bumpHotMemoryCache's
   // split('::') can never mis-slice a component.
-  // Engine id rides as the LAST segment so bumpHotMemoryCache's positional
-  // parts[0]/parts[2] matching stays valid.
-  const cacheKey = `${encodeCacheField(sourceId)}::${tier}::${encodeCacheField(sessionId ?? '_')}::${allowListHash}::${engineCacheId(ctx.engine)}`;
+  // The ENGINE is part of the key: one process can serve multiple brains
+  // (hosted multi-tenant, test shards, mounted brains), and two engines with
+  // the same source id / tier / session must never share hot-memory payloads
+  // — a cached entry from brain A served to brain B's caller is a cross-brain
+  // fact leak through the cache, not through any query.
+  const cacheKey = `${engineCacheField(ctx.engine)}::${encodeCacheField(sourceId)}::${tier}::${encodeCacheField(sessionId ?? '_')}::${allowListHash}`;
 
   const ttl = Math.max(1000, opts.ttlMs ?? DEFAULT_TTL_MS);
   const topK = Math.max(1, Math.min(opts.topK ?? DEFAULT_TOP_K, 25));
@@ -183,17 +167,32 @@ export async function getBrainHotMemoryMeta(
 /** Invalidate the cache for a (source_id, session_id) pair after extraction. */
 export function bumpHotMemoryCache(sourceId: string, sessionId: string | null): void {
   // Walk the cache and prune any entry matching this source+session
-  // (regardless of visibility tier, allow-list hash, or engine — key layout is
-  // encField(source)::tier::encField(session)::allowHash::engineId; pruning
-  // across engines over-invalidates, which is the safe direction).
-  // Components are ':'-encoded, so split('::') slices cleanly even when the
-  // source/session id itself contains '::' (F5).
+  // regardless of visibility tier, allow-list hash, OR engine — key layout is
+  // engine::encField(source)::tier::encField(session)::allowHash. Pruning
+  // across engines is deliberate over-invalidation: a bump is a freshness
+  // signal and a stale-drop on a sibling engine costs one rebuild, never a
+  // leak. Components are ':'-encoded, so split('::') slices cleanly even
+  // when the source/session id itself contains '::' (F5).
   const encSource = encodeCacheField(sourceId);
   const encSession = encodeCacheField(sessionId ?? '_');
   for (const k of _cache.keys()) {
     const parts = k.split('::');
-    if (parts[0] === encSource && parts[2] === encSession) _cache.delete(k);
+    if (parts[1] === encSource && parts[3] === encSession) _cache.delete(k);
   }
+}
+
+// Engine identity for the cache key: a WeakMap-issued serial, so the key
+// stays a flat string (the bounded Map + prefix pruning keep working) and a
+// disconnected engine can be garbage-collected.
+const ENGINE_KEYS = new WeakMap<object, string>();
+let engineKeySeq = 0;
+function engineCacheField(engine: object): string {
+  let k = ENGINE_KEYS.get(engine);
+  if (!k) {
+    k = `e${++engineKeySeq}`;
+    ENGINE_KEYS.set(engine, k);
+  }
+  return k;
 }
 
 /** Percent-encode ':' so a caller-controlled id can't inject the '::' key

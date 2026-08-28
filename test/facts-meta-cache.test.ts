@@ -197,32 +197,6 @@ describe('meta-hook cache hygiene (bounded, expired-entry eviction)', () => {
     } as unknown as BrainEngine;
   }
 
-  test('the cache never crosses ENGINES: same (source, tier, session, allow-list), different engine, different payload', async () => {
-    // The CI-shard leak this pins: the cache is process-global while engines
-    // are per-brain — before the engine-id key segment, suite A's facts were
-    // served into suite B's `_meta.brain_hot_memory` whenever both used
-    // source 'default' with a null session inside one TTL window.
-    const factRow = (fact: string) => ({
-      id: 1, fact, kind: 'fact', notability: 'medium', entity_slug: 'people/x',
-      visibility: 'world', confidence: 1, valid_from: new Date(), created_at: new Date(),
-      context: null,
-    });
-    const engineA = {
-      listFactsBySession: async () => [],
-      listFactsSince: async () => [factRow('engine A fact')],
-    } as unknown as BrainEngine;
-    const engineB = {
-      listFactsBySession: async () => [],
-      listFactsSince: async () => [factRow('engine B fact')],
-    } as unknown as BrainEngine;
-
-    const a = await getBrainHotMemoryMeta('get_stats', ctx({ engine: engineA }));
-    const b = await getBrainHotMemoryMeta('get_stats', ctx({ engine: engineB }));
-    expect(JSON.stringify(a)).toContain('engine A fact');
-    expect(JSON.stringify(b)).toContain('engine B fact');
-    expect(JSON.stringify(b)).not.toContain('engine A fact'); // pre-fix: B served A's cached payload
-  });
-
   test('expired entry is evicted on read-miss even when the rebuild fails', async () => {
     await engine.insertFact(
       { fact: 'expiry-evict seed', kind: 'fact', entity_slug: 'expiry-evict', visibility: 'world', source: 'test' },
@@ -236,21 +210,39 @@ describe('meta-hook cache hygiene (bounded, expired-entry eviction)', () => {
 
     // Rebuild path throws (dispatch absorbs this in production). The expired
     // entry must NOT survive the failed rebuild — delete happens on read-miss.
-    // The rebuild must come from the SAME engine object: the cache key folds
-    // engine identity (a different engine is a different key by design and
-    // could never read-miss this entry), so the failure is injected by
-    // patching the warm engine's methods rather than swapping engines.
-    const origBySession = engine.listFactsBySession;
-    const origSince = engine.listFactsSince;
+    // Same ENGINE as the warm call: the cache key folds engine identity (a
+    // different engine is a different key and never touches this entry; its
+    // expired corpse is reaped by the overflow eviction, which picks
+    // oldest-expiry first).
+    // Instance-property shadows over the prototype methods; deleted in
+    // finally so the shared engine is intact for later tests.
+    const mutable = engine as unknown as Record<string, unknown>;
+    mutable.listFactsBySession = async () => { throw new Error('boom'); };
+    mutable.listFactsSince = async () => { throw new Error('boom'); };
     try {
-      engine.listFactsBySession = async () => { throw new Error('boom'); };
-      engine.listFactsSince = async () => { throw new Error('boom'); };
       await expect(getBrainHotMemoryMeta('get_stats', ctx())).rejects.toThrow('boom');
+      expect(cache.size).toBe(0);
     } finally {
-      engine.listFactsBySession = origBySession;
-      engine.listFactsSince = origSince;
+      delete mutable.listFactsBySession;
+      delete mutable.listFactsSince;
     }
-    expect(cache.size).toBe(0);
+  });
+
+  test('cache never serves one engine\'s payload to another engine (cross-brain isolation)', async () => {
+    // One process, two brains, identical source/tier/session: the hot-memory
+    // cache key folds ENGINE identity, so brain B is never served brain A's
+    // facts inside the TTL. This is the CI shard-7 leak (a conformance
+    // suite's fact surfacing in the privacy sweep's _meta) and the hosted
+    // multi-tenant cross-brain leak, pinned.
+    await engine.insertFact(
+      { fact: 'engine-A hot fact', kind: 'fact', entity_slug: 'engine-a-iso', visibility: 'world', source: 'test' },
+      { source_id: 'default' },
+    );
+    const a = await getBrainHotMemoryMeta('get_stats', ctx());
+    expect(JSON.stringify(a ?? {})).toContain('engine-A hot fact');
+    const engineB = emptyEngine();
+    const b = await getBrainHotMemoryMeta('get_stats', ctx({ engine: engineB }));
+    expect(JSON.stringify(b ?? {})).not.toContain('engine-A hot fact');
   });
 
   test('max-entries bound holds under many distinct (caller-controlled) session ids', async () => {
