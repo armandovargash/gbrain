@@ -2,7 +2,7 @@
 
 All notable changes to GBrain will be documented in this file.
 
-## [0.47.1.0] - 2026-08-27
+## [0.47.4.0] - 2026-08-28
 
 **Your brain's remote surface now behaves the same everywhere: reads stay
 inside your grant, credentials never ride along in responses, and the test
@@ -33,7 +33,7 @@ exit clean (your nightly cron can't break on a machine without API keys);
 contradiction reads return complete result pages instead of silently
 under-filling; and `run_skillopt` errors carry stable machine-readable codes.
 
-## To take advantage of v0.47.1.0
+## To take advantage of v0.47.4.0
 
 `gbrain upgrade` is all you need — there are no schema migrations and no
 manual steps in this release.
@@ -117,6 +117,39 @@ manual steps in this release.
   binds into known-JSONB columns; guard self-tests cover both new guards.
 - The unmapped-e2e baseline and the operation-coverage allowlist are seeded
   shrink-only; stale entries fail the build with removal instructions.
+## [0.47.3.0] - 2026-08-27
+
+**Wave L: the wave-k close-out.** Three held-back items from the wave-k triage,
+each resolved with the maintainer's explicit call, plus reference docs for
+three surfaces that shipped without a home.
+
+### Behavior changes
+- **Security (#4433): `sources_list` is now confined to the caller's resolved
+  source scope for ALL remote callers**, not just those with a federated read
+  grant. Remote clients on the scalar default-source floor (legacy bearer
+  tokens, pre-`federated_read` OAuth clients) now see only their bound source
+  instead of the full source registry; a remote `__all__` scope yields an
+  empty listing (fail-closed). Local CLI (`gbrain sources list`) keeps the
+  full operator listing. Need the wider listing remotely? Widen the grant:
+  `gbrain auth rescope-client <id> --federated-read src1,src2,…`. This
+  supersedes wave-g's softer posture by maintainer decision.
+
+### Added
+- Same-turn memory write-back is now part of the install contract: `verify`
+  gains a `writeback_contract` check and `gbrain bootstrap contract [--repair]`
+  audits AGENTS.md, appending an additive, backed-up gate for pre-bootstrap or
+  custom workspaces (never overwrites; refuses symlinks). Templates route
+  atomic facts through `remember` with explicit provenance. (#4105 by
+  @garrytan-agents)
+  **Say to your agent:** "check my workspace's memory write-back contract" /
+  "run gbrain bootstrap contract --repair"
+- Reference docs for three previously undocumented surfaces:
+  `apply-migrations --list/--dry-run/--require-db` + the DB-probe line
+  (docs/GBRAIN_VERIFY.md), the bulk-embed failure knobs
+  `GBRAIN_EMBED_QUARANTINE_AFTER` / `GBRAIN_EMBED_MAX_BATCH_TOKENS`
+  (docs/integrations/embedding-providers.md), and `config get` redaction +
+  `--raw` (docs/INSTALL.md).
+
 ## [0.47.0.0] - 2026-08-25
 
 The Gmail-first open-loop engine. Connect your Google account once and gbrain

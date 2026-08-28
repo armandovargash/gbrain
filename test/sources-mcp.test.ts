@@ -80,13 +80,14 @@ function findOp(name: string): Operation {
   return op;
 }
 
-function ctxRemote(scopes: string[]): OperationContext {
+function ctxRemote(scopes: string[], allowedSources?: string[]): OperationContext {
   const auth: AuthInfo = {
     token: 'gbrain_at_xxx',
     clientId: 'gbrain_cl_test',
     clientName: 'test-client',
     scopes,
     expiresAt: Math.floor(Date.now() / 1000) + 3600,
+    ...(allowedSources ? { allowedSources } : {}),
   };
   return {
     engine: engine as any,
@@ -154,7 +155,9 @@ describe('sources_* handlers — happy path', () => {
         url: 'https://github.com/example/repo',
       });
       const listOp = findOp('sources_list');
-      const result = (await listOp.handler(ctxRemote(['read']), {})) as any;
+      // #4433 wave-L: sources_list confines remote callers to their scope,
+      // so the listing caller needs a grant covering the source it asserts on.
+      const result = (await listOp.handler(ctxRemote(['read'], ['mcp-list-test']), {})) as any;
       expect(Array.isArray(result.sources)).toBe(true);
       const found = result.sources.find((s: any) => s.id === 'mcp-list-test');
       expect(found).toBeDefined();
@@ -170,11 +173,11 @@ describe('sources_* handlers — happy path', () => {
         url: 'https://github.com/example/repo',
       });
       const statusOp = findOp('sources_status');
-      // A plain scalar remote caller (ctx.sourceId 'default', no federated
-      // grant) may status ANY source by naming it explicitly — the #4433
-      // boundary confines only FEDERATED grants (see the dedicated negative
-      // test below).
-      const result = (await statusOp.handler(ctxRemote(['read']), {
+      // #4433 wave-L posture: every untrusted caller is confined through the
+      // canonical ladder, so the reader needs a grant covering the source it
+      // diagnoses (scalar-floor naming was superseded — see the negatives
+      // below).
+      const result = (await statusOp.handler(ctxRemote(['read'], ['mcp-status-test']), {
         id: 'mcp-status-test',
       })) as any;
       expect(result.id).toBe('mcp-status-test');
@@ -191,8 +194,8 @@ describe('sources_* handlers — happy path', () => {
         url: 'https://github.com/example/repo',
       });
       const statusOp = findOp('sources_status');
-      // #4433 boundary: a federated grant (non-empty auth.allowedSources) is
-      // the ONLY remote shape that confines sources_status. Out-of-grant ids
+      // #4433 wave-L: any untrusted scope (federated grant here; scalar in
+      // the sibling test below) confines sources_status. Out-of-scope ids
       // must answer not_found — indistinguishable from a nonexistent source
       // (anti-enumeration).
       const base = ctxRemote(['read']);
@@ -217,6 +220,33 @@ describe('sources_* handlers — happy path', () => {
       // substitution — the error shape cannot be used as an existence oracle.
       expect(existing.message.replaceAll('mcp-fed-test', '<id>'))
         .toBe(nonexistent.message.replaceAll('no-such-source', '<id>'));
+    });
+  });
+
+  test('sources_status: SCALAR-bound remote caller is confined too (wave-L); trusted local never is', async () => {
+    await withEnv({ GBRAIN_HOME, PATH: fakePath() }, async () => {
+      const addOp = findOp('sources_add');
+      await addOp.handler(ctxRemote(['sources_admin']), {
+        id: 'mcp-scalar-test',
+        url: 'https://github.com/example/repo',
+      });
+      const statusOp = findOp('sources_status');
+      // ctxRemote pins sourceId 'default' with no federated grant — the
+      // wave-L ladder confines the caller to 'default', so an existing
+      // out-of-scope source answers not_found.
+      let threw: OperationError | null = null;
+      try {
+        await statusOp.handler(ctxRemote(['read']), { id: 'mcp-scalar-test' });
+      } catch (e) {
+        threw = e as OperationError;
+      }
+      expect(threw).toBeInstanceOf(OperationError);
+      expect(threw!.code).toBe('not_found');
+      // Trusted local keeps the full operator view regardless of sourceId.
+      const local: OperationContext = { ...ctxRemote(['read']), remote: false };
+      const res = (await statusOp.handler(local, { id: 'mcp-scalar-test' })) as any;
+      expect(res.id).toBe('mcp-scalar-test');
+      expect(res.clone_state).toBe('healthy');
     });
   });
 
@@ -380,7 +410,9 @@ describe('sources_list — include_archived honored (was silently leaking)', () 
       );
 
       const listOp = findOp('sources_list');
-      const result = (await listOp.handler(ctxRemote(['read']), {})) as any;
+      // #4433 wave-L: grant covers the archived source, so the absence below
+      // pins the archived filter itself rather than the scope confinement.
+      const result = (await listOp.handler(ctxRemote(['read'], ['archived-src']), {})) as any;
       const found = result.sources.find((s: any) => s.id === 'archived-src');
       expect(found).toBeUndefined();
     });
@@ -399,7 +431,7 @@ describe('sources_list — include_archived honored (was silently leaking)', () 
       );
 
       const listOp = findOp('sources_list');
-      const result = (await listOp.handler(ctxRemote(['read']), {
+      const result = (await listOp.handler(ctxRemote(['read'], ['archived-included']), {
         include_archived: true,
       })) as any;
       const found = result.sources.find((s: any) => s.id === 'archived-included');

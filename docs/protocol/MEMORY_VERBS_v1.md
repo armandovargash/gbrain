@@ -245,15 +245,15 @@ pre-v0.45.x servers; a server that omits them still certifies):
   `extractive_fallback` (the LLM compose step failed but retrieval succeeded —
   `answer` is an extractive digest quoting ONLY retrieved pages, `sources`
   cite the digested pages). The remaining enum values (`empty_answer`,
-  `not_json`, `no_llm`, `model_unusable`, `llm_error`) name compose-failure
-  states a non-verb `think` surface may report; the verb converts them to the
-  fallback or a typed error and never emits them itself.
+  `not_json`, `output_truncated`, `no_llm`, `model_unusable`, `llm_error`)
+  name compose-failure states a non-verb `think` surface may report; the verb
+  converts them to the fallback or a typed error and never emits them itself.
 - `pages_gathered` / `takes_gathered` — retrieval counts behind the answer.
 - `warnings` — machine-stable pipeline warning codes (e.g.
-  `LLM_OUTPUT_NOT_JSON`, `SYNTHESIS_EMPTY_ANSWER`, `LLM_CALL_FAILED: <class>`
-  where `<class>` is one of the closed set `timeout` | `rate_limited` |
-  `network` | `provider_error` — raw provider detail never rides the wire,
-  `MODEL_NOT_USABLE:<reason>`).
+  `LLM_OUTPUT_NOT_JSON`, `LLM_OUTPUT_TRUNCATED`, `SYNTHESIS_EMPTY_ANSWER`,
+  `LLM_CALL_FAILED: <class>` where `<class>` is one of the closed set
+  `timeout` | `rate_limited` | `network` | `provider_error` — raw provider
+  detail never rides the wire, `MODEL_NOT_USABLE:<reason>`).
 
 Precedence (frozen): compose failure + NON-EMPTY gather ⇒
 `extractive_fallback` — the digest is composed exclusively from gathered
@@ -264,7 +264,9 @@ call time (429 / timeout / 5xx / network) are caught into `llm_error` and
 follow the same precedence. No LLM configured stays the `unavailable`
 configure-and-retry error regardless of gather — an extractive digest would
 mask the misconfiguration forever. Refusals parse as `not_json` (coarse on
-purpose, no dedicated status).
+purpose, no dedicated status); a `max_tokens`-cut envelope parses as
+`output_truncated` (warning `LLM_OUTPUT_TRUNCATED`) so a too-small output
+budget is distinguishable from malformed model output.
 
 ### forget(id, reason?) — write
 

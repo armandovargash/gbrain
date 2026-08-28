@@ -184,20 +184,15 @@ const MATRIX: Row[] = [
   { name: 'ontology_dimensions', mode: 'isolated', args: {} },
   { name: 'volunteer_chronicle', mode: 'isolated', args: { days: 30, limit: 50 } },
   { name: 'extraction_pending', mode: 'isolated', args: { limit: 50 } },
-  // #4433 boundary (mirrors sources_list): only a FEDERATED grant confines
-  // sources_status — an out-of-grant id answers not_found (handled by the
-  // walk's fail-closed catch arm, so REACHING expectScoped under 'federated'
-  // is itself the failure). The remote SCALAR ctx is the documented
-  // default-source floor: it may name any source explicitly, so the status
-  // payload for the caller-named id is ALLOWED and not a leak (the payload
-  // is diagnostics for the id the caller itself supplied).
+  // #4433 wave-L posture (mirrors sources_list): EVERY untrusted scope —
+  // federated grant AND scalar bound source — confines sources_status; an
+  // out-of-scope id answers not_found (the walk's fail-closed catch arm
+  // handles the throw, so REACHING expectScoped under either ctx is itself
+  // the failure). Trusted local keeps the full operator view (the control).
   { name: 'sources_status', mode: 'isolated', args: { id: 'srcbeta' },
     controlSees: r => JSON.stringify(r).includes('srcbeta'),
-    expectScoped: (r, ctxLabel) => {
-      if (ctxLabel === 'federated') {
-        throw new Error('sources_status must fail closed (not_found) for out-of-federated-grant ids');
-      }
-      expect((r as { id?: string })?.id).toBe('srcbeta');
+    expectScoped: () => {
+      throw new Error('sources_status must fail closed (not_found) for out-of-scope ids under any untrusted ctx');
     } },
   { name: 'schema_stats', mode: 'isolated', args: {} },
   { name: 'schema_review_orphans', mode: 'isolated', args: { limit: 50 } },
