@@ -6,6 +6,7 @@ import { describe, test, expect, beforeEach, afterAll } from 'bun:test';
 import {
   healOversizedChunks,
   healedChunksToStaleRows,
+  healOversizedPageChunks,
 } from '../src/core/embed-oversize-heal.ts';
 import type { Chunk } from '../src/core/types.ts';
 import { estimateEmbedTokens } from '../src/core/chunkers/token-estimate.ts';
@@ -179,5 +180,84 @@ describe('healOversizedChunks', () => {
       expect(chunk.doc_comment).toBe('Build the searchable index.');
       expect(chunk.symbol_name_qualified).toBe('SearchEngine.buildIndex');
     }
+  });
+});
+
+describe('healOversizedPageChunks (load → split → upsert → reload orchestrator)', () => {
+  test('no-op path: every chunk fits → returns the loaded chunks, never calls upsertChunks', async () => {
+    const existing = [
+      chunkRow({ chunk_index: 0, chunk_text: 'fits fine' }),
+      chunkRow({ id: 2, chunk_index: 1, chunk_text: 'also fits' }),
+    ];
+    const methodCalls: string[] = [];
+    const engine = {
+      getChunks: async () => {
+        methodCalls.push('getChunks');
+        return existing;
+      },
+      upsertChunks: async () => {
+        methodCalls.push('upsertChunks');
+      },
+    };
+
+    const onSplitCalls: number[] = [];
+    const res = await healOversizedPageChunks(engine as never, 'notes/fits', {
+      maxTokens: MXBAI_CAP,
+      onSplit: (n) => onSplitCalls.push(n),
+    });
+
+    expect(res.changed).toBe(false);
+    expect(res.splitCount).toBe(0);
+    // The SAME loaded array comes back — no reload, no write, no onSplit.
+    expect(res.chunks).toBe(existing);
+    expect(methodCalls).toEqual(['getChunks']);
+    expect(onSplitCalls).toEqual([]);
+  });
+
+  test('changed path: fires onSplit(n), upserts split pieces scoped to the source, returns the RELOADED chunks', async () => {
+    const oversized = fatParagraph(40);
+    const initial = [chunkRow({ chunk_index: 0, chunk_text: oversized, token_count: 5000 })];
+    const reloaded = [
+      chunkRow({ chunk_index: 0, chunk_text: 'reloaded piece one' }),
+      chunkRow({ id: 2, chunk_index: 1, chunk_text: 'reloaded piece two' }),
+    ];
+    let getCalls = 0;
+    const getOptsSeen: unknown[] = [];
+    let upserted: Array<{ chunk_text: string }> | undefined;
+    let upsertOpts: unknown;
+    const engine = {
+      getChunks: async (_slug: string, opts?: unknown) => {
+        getCalls++;
+        getOptsSeen.push(opts);
+        return getCalls === 1 ? initial : reloaded;
+      },
+      upsertChunks: async (_slug: string, chunks: Array<{ chunk_text: string }>, opts?: unknown) => {
+        upserted = chunks;
+        upsertOpts = opts;
+      },
+    };
+
+    const onSplitCalls: number[] = [];
+    const res = await healOversizedPageChunks(engine as never, 'notes/fat', {
+      sourceId: 'src-a',
+      maxTokens: MXBAI_CAP,
+      onSplit: (n) => onSplitCalls.push(n),
+    });
+
+    expect(onSplitCalls).toEqual([1]);
+    expect(res.changed).toBe(true);
+    expect(res.splitCount).toBe(1);
+    // The result is the RE-LOADED chunk list (post-upsert DB truth), not the
+    // in-memory split — callers feed it to healedChunksToStaleRows.
+    expect(res.chunks).toBe(reloaded);
+    // The upsert received the split pieces, each within the cap.
+    expect(upserted).toBeDefined();
+    expect(upserted!.length).toBeGreaterThan(1);
+    for (const c of upserted!) {
+      expect(estimateEmbedTokens(c.chunk_text)).toBeLessThanOrEqual(MXBAI_CAP);
+    }
+    // Both reads and the write stay scoped to the caller's source.
+    expect(getOptsSeen).toEqual([{ sourceId: 'src-a' }, { sourceId: 'src-a' }]);
+    expect(upsertOpts).toEqual({ sourceId: 'src-a' });
   });
 });

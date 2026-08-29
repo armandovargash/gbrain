@@ -1435,3 +1435,72 @@ describe('#4599 stall watchdog (runEmbedCore --stale)', () => {
     expect(result.failures).toBe(0);
   }, 20_000);
 });
+
+// ────────────────────────────────────────────────────────────────
+// #4647: single-flight lock heartbeat — per-tick refresh timeout
+// ────────────────────────────────────────────────────────────────
+//
+// The incident shape: a wedged pooler connection makes `refresh()` hang
+// FOREVER (it never settles and ignores the abort signal). Without the
+// per-tick timeout race, the first hung tick would leave `beating = true`
+// permanently — no consecutive-error accounting, no lock_lost, and the drain
+// runs unbounded without mutual exclusion. The fix bounds every tick with
+// GBRAIN_EMBED_LOCK_HEARTBEAT_TIMEOUT_MS; three consecutive refresh_timeouts
+// must flip lock_lost and abort the drain.
+describe('#4647: heartbeat tick timeout — never-settling refresh', () => {
+  test('3 consecutive refresh timeouts → lock_lost + drain abort', async () => {
+    process.env.GBRAIN_EMBED_LOCK_HEARTBEAT_MS = '5';
+    process.env.GBRAIN_EMBED_LOCK_HEARTBEAT_TIMEOUT_MS = '10';
+
+    let refreshCalls = 0;
+    const fakeLock: DbLockHandle = {
+      id: 'wedged-pool-refresh',
+      acquiredAt: '0',
+      release: async () => {},
+      // The #4647 shape: never settles, never observes the abort signal.
+      refresh: () => {
+        refreshCalls++;
+        return new Promise<boolean>(() => {});
+      },
+    };
+
+    // Infinite stale feed at batchSize=1: the drain can ONLY terminate via
+    // the lock-loss abort. If the per-tick timeout regresses, this test
+    // hangs (and fails on its own timeout) instead of returning.
+    let listStaleCalls = 0;
+    let pageId = 0;
+    const engine = mockEngine({
+      countChunklessPagesWithContent: async () => 0,
+      listChunklessPagesWithContent: async () => [],
+      countStaleChunks: async () => 999999, // non-zero: pass the early "nothing stale" return
+      invalidateContentDriftEmbeddings: async () => 0,
+      listStaleChunks: async () => {
+        listStaleCalls++;
+        await new Promise((r) => setTimeout(r, 10));
+        pageId++;
+        return [{
+          slug: `p-${pageId}`, chunk_index: 0, chunk_text: 'hi',
+          chunk_source: 'compiled_truth' as const, model: null, token_count: 1,
+          source_id: 'default', page_id: pageId,
+        }];
+      },
+      getChunks: async () => [],
+      upsertChunks: async () => {},
+    });
+
+    const result = await runEmbedCore(engine, {
+      stale: true,
+      quiet: true,
+      batchSize: 1,
+      heldLocks: [fakeLock],
+    });
+
+    // Mutual exclusion is gone → the drain ABORTED with lock_lost set.
+    expect(result.lock_lost).toBe(true);
+    // The consecutive-error threshold (3) was actually exercised.
+    expect(refreshCalls).toBeGreaterThanOrEqual(3);
+    // The abort cut the infinite feed short (sanity bound: the drain did not
+    // keep looping after lock loss).
+    expect(listStaleCalls).toBeLessThan(200);
+  }, 15_000);
+});
