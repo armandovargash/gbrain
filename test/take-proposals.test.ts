@@ -344,6 +344,57 @@ describe('CLI dispatcher (#2411 no-fallthrough)', () => {
     }
   });
 
+  test('accept path normalizes a munged old-shape loadProposal row (BigInt/string id, string weight)', async () => {
+    // loadProposal's SELECT (`FROM take_proposals WHERE id = $1`) is a
+    // DIFFERENT query from listPendingProposals' — a Postgres driver
+    // returning BigInt ids / NUMERIC-as-string weights on THAT read must be
+    // normalized before the row reaches the fence write and the caller.
+    const id = await insertProposal({
+      slug: 'companies/acme-example',
+      claim: 'accept: munged driver row',
+      weight: 0.65,
+    });
+    const originalExecuteRaw = engine.executeRaw;
+    engine.executeRaw = (async <T>(query: string, params?: unknown[]): Promise<T[]> => {
+      const rows = await originalExecuteRaw.call(engine, query, params) as T[];
+      // Match ONLY the loadProposal SELECT — the id-keyed single-row read.
+      if (!query.includes('FROM take_proposals') || !query.includes('WHERE id = $1')) {
+        return rows;
+      }
+      return rows.map((row) => {
+        const record = row as Record<string, unknown>;
+        return {
+          ...record,
+          id: BigInt(Number(record.id)),
+          weight: String(record.weight),
+          promoted_row_num: record.promoted_row_num == null
+            ? null
+            : BigInt(Number(record.promoted_row_num)),
+        } as T;
+      });
+    }) as typeof engine.executeRaw;
+
+    try {
+      const { proposal, rowNum } = await acceptProposal(
+        { engine, brainDir: repo, sourceId: 'default', actedBy: 'people/tester' },
+        id,
+      );
+      // The public numeric row contract: normalized id AND weight.
+      expect(proposal.id).toBe(id);
+      expect(typeof proposal.id).toBe('number');
+      expect(typeof proposal.weight).toBe('number');
+      expect(proposal.weight).toBeCloseTo(0.65, 6);
+      expect(rowNum).toBeGreaterThan(0);
+      // The promoted take carries the numeric weight through to the DB mirror.
+      const takes = await engine.listTakes({ page_slug: 'companies/acme-example', active: true });
+      const promoted = takes.find((t) => t.claim === 'accept: munged driver row');
+      expect(promoted).toBeDefined();
+      expect(Number(promoted!.weight)).toBeCloseTo(0.65, 6);
+    } finally {
+      engine.executeRaw = originalExecuteRaw;
+    }
+  });
+
   test('`takes propose --accept <id>` promotes and reports the fence row', async () => {
     const id = await insertProposal({ slug: 'companies/acme-example', claim: 'cli: accept me' });
     const out = await captureStdout(() => runTakes(engine, ['propose', '--accept', String(id)]));

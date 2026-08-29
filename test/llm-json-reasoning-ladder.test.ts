@@ -76,8 +76,22 @@ describe('extractors route through the ladder', () => {
   });
 
   test('atoms extractor preserves the ORIGINAL failure reason when the retry also fails', () => {
+    // This input actually ENTERS the retry branch: the raw parse finds the
+    // '[' drafted inside <think> and fails as an unterminated array (no ']'
+    // anywhere), while the STRIPPED retry has no bracket at all and would
+    // fail with the DIFFERENT reason 'no JSON array in response'. The ladder
+    // must discard the failed retry and return the raw parse's reason —
+    // asserting the exact string proves which of the two came back.
+    const raw = '<think>draft: [1, 2</think>and then some prose';
+    const outcome = parseAtomsOutcome(raw);
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) expect(outcome.reason).toBe('unterminated JSON array');
+  });
+
+  test('atoms extractor: non-reasoning garbage returns the direct reason untouched (strip is a no-op)', () => {
     // Regression guard: the ladder must not mask error reporting for models
-    // that never emit reasoning blocks.
+    // that never emit reasoning blocks — stripping changes nothing here, so
+    // the retry never runs and the direct outcome passes through.
     const outcome = parseAtomsOutcome('not json at all');
     expect(outcome.ok).toBe(false);
     if (!outcome.ok) expect(outcome.reason).toContain('no JSON array');

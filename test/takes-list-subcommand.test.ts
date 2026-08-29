@@ -122,3 +122,69 @@ describe('gbrain takes list --limit/--offset (#4629)', () => {
     expect(parsed.length).toBe(4);
   });
 });
+
+describe('gbrain takes list — invalid --limit/--offset exit 1 (#4629 negative paths)', () => {
+  /**
+   * Drive runTakes with process.exit stubbed (the real one returns `never`,
+   * so the stub throws to stop cmdList before it reaches engine.listTakes)
+   * and console.error captured. Pattern from test/commands-search.test.ts.
+   */
+  async function runExpectingExit(args: string[]): Promise<{ exitCode: number; stderr: string }> {
+    let exitCode = 0;
+    const errLines: string[] = [];
+    const originalExit = process.exit;
+    const originalErr = console.error;
+    (process.exit as unknown as (code?: number) => void) = ((code?: number) => {
+      exitCode = code ?? 0;
+      throw new Error('exit-' + code);
+    }) as never;
+    console.error = (...a: unknown[]) => { errLines.push(a.join(' ')); };
+    try {
+      await runTakes(engine, args);
+    } catch { /* the exit stub throws by design */ } finally {
+      process.exit = originalExit;
+      console.error = originalErr;
+    }
+    return { exitCode, stderr: errLines.join('\n') };
+  }
+
+  test('`--limit 0` is rejected: positive-integer message + exit 1', async () => {
+    const { exitCode, stderr } = await runExpectingExit(['list', '--limit', '0']);
+    expect(exitCode).toBe(1);
+    expect(stderr).toContain('Invalid --limit "0". Expected a positive integer.');
+  });
+
+  test('`--limit abc` is rejected: positive-integer message + exit 1', async () => {
+    const { exitCode, stderr } = await runExpectingExit(['list', '--limit', 'abc']);
+    expect(exitCode).toBe(1);
+    expect(stderr).toContain('Invalid --limit "abc". Expected a positive integer.');
+  });
+
+  test('`--limit 12abc` is rejected — parseInt truncation must not slip trailing garbage through', async () => {
+    // Pre-guard, parseInt('12abc') === 12 silently ran the query with a
+    // truncated limit. The /^\d+$/ pre-check rejects it with the SAME copy.
+    const { exitCode, stderr } = await runExpectingExit(['list', '--limit', '12abc']);
+    expect(exitCode).toBe(1);
+    expect(stderr).toContain('Invalid --limit "12abc". Expected a positive integer.');
+  });
+
+  test('`--offset -1` is rejected: non-negative message + exit 1', async () => {
+    const { exitCode, stderr } = await runExpectingExit(['list', '--offset', '-1']);
+    expect(exitCode).toBe(1);
+    expect(stderr).toContain('Invalid --offset "-1". Expected a non-negative integer.');
+  });
+
+  test('`--offset 3xyz` is rejected — same full-string discipline as --limit', async () => {
+    const { exitCode, stderr } = await runExpectingExit(['list', '--offset', '3xyz']);
+    expect(exitCode).toBe(1);
+    expect(stderr).toContain('Invalid --offset "3xyz". Expected a non-negative integer.');
+  });
+
+  test('valid boundary values still pass: --limit 1 and --offset 0', async () => {
+    // Guard-rail for the new pre-check: it must not reject legitimate input.
+    const out = await captureStdout(() =>
+      runTakes(engine, ['list', '--json', '--sort', 'weight', '--limit', '1', '--offset', '0']));
+    const parsed = JSON.parse(out) as unknown[];
+    expect(parsed.length).toBe(1);
+  });
+});

@@ -136,13 +136,25 @@ async function cmdList(engine: BrainEngine, args: string[]): Promise<void> {
   // parsed by the CLI — every `takes list` call silently used the engine
   // defaults. The engine clamps limit (default 100, cap 500) and floors
   // offset at 0; the CLI just validates the raw values are integers.
+  // Whole-string digit pre-check: parseInt('12abc') === 12 would otherwise
+  // slip trailing garbage through as a silently-truncated value (and
+  // '1e3' would become 1). Same full-string discipline as cmdPropose's
+  // parseId; the error copy stays identical to the numeric guards below.
   const limitRaw = flagValue(args, '--limit');
+  if (limitRaw !== undefined && !/^\d+$/.test(limitRaw.trim())) {
+    console.error(`Invalid --limit "${limitRaw}". Expected a positive integer.`);
+    process.exit(1);
+  }
   const limit = limitRaw !== undefined ? parseInt(limitRaw, 10) : undefined;
   if (limit !== undefined && (!Number.isFinite(limit) || limit <= 0)) {
     console.error(`Invalid --limit "${limitRaw}". Expected a positive integer.`);
     process.exit(1);
   }
   const offsetRaw = flagValue(args, '--offset');
+  if (offsetRaw !== undefined && !/^\d+$/.test(offsetRaw.trim())) {
+    console.error(`Invalid --offset "${offsetRaw}". Expected a non-negative integer.`);
+    process.exit(1);
+  }
   const offset = offsetRaw !== undefined ? parseInt(offsetRaw, 10) : undefined;
   if (offset !== undefined && (!Number.isFinite(offset) || offset < 0)) {
     console.error(`Invalid --offset "${offsetRaw}". Expected a non-negative integer.`);
