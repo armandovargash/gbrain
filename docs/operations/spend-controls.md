@@ -40,7 +40,11 @@ The USD-limit knobs accept `off`, `unlimited`, or `none` (case-insensitive) to m
 "no limit" — no more setting sentinel values like `100000`.
 
 - `0` is **not** "off". On `sync.cost_gate_min_usd`, `0` means "block on any nonzero
-  spend" (a real choice). On the backfill caps, `0` falls back to the default.
+  spend" (a real choice). On the backfill caps, `0` falls back to the default — and on
+  `embed.backfill_max_usd` specifically, any present-but-invalid value (`0`, a
+  negative, garbage text) is treated as a typo'd cap: the $10 default applies and is
+  **never dropped**, even for unpriced models (see "Default caps vs unpriced models"
+  below). Only `off` removes that ceiling.
 - Internally "no limit" is the string `unlimited` in any printed/JSON output and "no
   cap" inside the budget tracker — never a raw `Infinity` (which would serialize to
   `null` in ledger rows).
@@ -51,7 +55,7 @@ The USD-limit knobs accept `off`, `unlimited`, or `none` (case-insensitive) to m
 |------|-----------|---------|---------|-----------|----------|
 | Sync inline-embed cost gate | `sync.cost_gate_min_usd` | `0.50` | TTY prompt / non-TTY auto-defer | `off` (or `0` = block-on-any) | informational |
 | Backfill 24h per-source spend cap | `embed.backfill_max_usd_per_source_24h` | `25` | refuses submission | `off` (`0` → default) | bypassed (still ledgered) |
-| Backfill per-job budget | `embed.backfill_max_usd` | `10` | caps the job's tracker | `off` (`0` → default) | uncapped (still ledgered) |
+| Backfill per-job budget | `embed.backfill_max_usd` | `10` | caps the job's tracker | `off` (`0`/garbage → default, fail-closed) | uncapped (still ledgered) |
 | Backfill cooldown | `embed.backfill_cooldown_min` | `10` | skips re-submission inside window | — (latency knob, not spend) | **not** bypassed |
 | `reindex-code` cost gate | — (preview before re-embed) | — | TTY prompt / non-TTY refuse + exit 2 | `--max-cost off` | informational |
 | `migrate embeddings` consent gate | — (plan + estimate before provider migration) | — | TTY y/N prompt / non-TTY refuse + exit 2 | `--yes` | estimate marked informational, but **still prompts** (guards a destructive schema rebuild, not just spend) |
@@ -166,6 +170,13 @@ different contract: you chose a ceiling, so an unpriced model stays
 fail-closed (`no_pricing`) — declare the model's rate in `pricing.overrides`
 to proceed. Spend is ledgered by the tracker either way; only the ceiling
 changes.
+
+A present-but-unparsable value is a third contract, and it is fail-closed:
+when `embed.backfill_max_usd` is SET but not a positive number (`"ten"`, `0`,
+a negative), the operator clearly intended a cap, so the $10 default applies
+and is NEVER dropped — even for unpriced models — with a stderr warning
+naming both fixes (correct the value, or set it to `off` to remove the
+ceiling). A typo must not silently degrade to uncapped spend.
 
 ## Escape hatches at a glance
 
