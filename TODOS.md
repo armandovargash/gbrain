@@ -1,5 +1,68 @@
 # TODOS
 
+## Fix-wave follow-ups (filed 2026-08-29, follow-up from the v0.47.x fix wave)
+
+- [ ] **P1 — #4599 root-cause instrumentation loop.** **What:** the embed
+  --stale hang's root cause is UNPINNED (heartbeat theory retracted by the
+  reporter on-thread 2026-08-28; the stall watchdog only bounds it). Build the
+  instrumented binary the reporter offered to run (near-daily repro rig):
+  candidate class is a lost promise in the drain — postgres.js pool +
+  PgBouncer transaction mode + idle_timeout interplay (both repros on port
+  6543). **Where to start:** the drain in src/commands/embed.ts +
+  src/core/embed-stall.ts telemetry; wrap pool acquisition with settle-time
+  tracing.
+- [ ] **P2 — pricing-overrides sweep of the remaining capped BudgetTracker
+  sites.** **What:** #4571/#4633 wired `loadPricingOverrides` into
+  embed-backfill + the three Conversation Facts entry points, but ~6 capped
+  sites still omit it (extract-atoms, skillopt, reindex-code, remediation,
+  eval-contradictions, brainbench) — 3rd recurrence of the class since #4312.
+  **Fix shape:** a factory helper (tracker-with-overrides) or a grep guard so
+  a new capped BudgetTracker without overrides fails at PR time.
+- [ ] **P2 — `<think>`-strip sweep of hand-rolled LLM JSON parsers.** **What:**
+  #4640 fixed parseLlmJson + the facts/atoms extractors and exported
+  `stripReasoningBlocks`, but ~13 hand-rolled brace-scan sites remain
+  (judges, grade-takes, drift, voice-gate, calibration-profile, chronicle,
+  facts/classify, loops-extract, skillopt x3, eval json-repair, think/index);
+  propose-takes.ts carries its own duplicate regex to converge.
+- [ ] **P2 — verify gpt-5.6-terra / gpt-5.6-sol canonical prices.** **What:**
+  while live-verifying luna (#4560), OpenAI's official pricing page listed
+  terra at $2.00/$12.00 and sol at $4.00/$20.00 vs CANONICAL_PRICING's
+  $2.50/$15.00 and $5.00/$30.00. Repo overprices → budget gates throttle
+  early (safe direction, no overspend), but the table should be re-verified
+  and corrected with its own `price_last_verified` refresh.
+- [ ] **P1 — #4616 PGLite vector-search reachability.** **What:** recently
+  written pages can be unreachable by vector search while doctor reports 100%
+  embedding coverage (suspected HNSW divergence after the auto WAL-repair;
+  heap vectors intact — recoverable, not lossy). **Fix shape (from triage):**
+  PGLite branch for vector-index dropAndRebuild + a contract-first
+  `reindex_vector` admin op + doctor self-recall reachability probe (ANN-query
+  the K most recent chunks with their own vectors) + rebuild-or-flag after WAL
+  repair. Design care: probe false positives (exact-scan columns, empty
+  index); inline-vs-queued rebuild after repair.
+- [ ] **P3 — hoist prompt-too-long helpers to a shared module.** **What:**
+  #4675 has subagent-oneshot.ts import isPromptTooLongError/
+  extractPromptTooLongDetail from subagent.ts while subagent.ts imports
+  runSubagentOneshot — a call-time-safe but structurally fragile import cycle.
+- [ ] **P3 — surface-aware MCP initialize instructions.** **What:** the #4643
+  contract constant references get_page/put_page/list_skills/get_skill, which
+  don't exist on `--surface verbs`; serve the verb-appropriate contract per
+  surface.
+- [ ] **P3 — per-source sync.exclude scoping.** **What:** #4667's persisted
+  exclude scope is global (union-only widening across every source); a
+  per-source key was the author's own follow-up note.
+- [ ] **P3 — skills-doc note on capture-time vs retroactive backlink dating.**
+  **What:** #4552/#4595 made backlink REPAIR insert undated "Referenced by"
+  rows (retroactive dating is forgery), while live capture keeps dated
+  "Referenced in" timeline entries — one line in skills/_brain-filing-rules.md
+  + quality.md + signal-detector so agents don't "fix" the divergence.
+- [ ] **P3 — unify the slug grammar repo-wide + surface legacy invalid slugs.**
+  **What:** put_page now validates via a widened local grammar
+  (dots/underscores as continuation chars) while cjk.ts's PAGE_SLUG_SEG stays
+  narrower for cite-render/slug-registry/dream — unify deliberately. Also add
+  a doctor/lint check listing pages whose slug fails validatePageSlug (Dream
+  historically wrote space-slugs; those rows are now un-updatable via
+  put_page) with rename guidance.
+
 ## Schema-bootstrap coverage follow-ups (filed 2026-08-29, follow-up from the #4657 P0 fix)
 
 - [ ] **P3 — Extend the blob forward-reference gates beyond CREATE INDEX.**
@@ -1207,6 +1270,22 @@
   `deadline_deferred` — so the doctor check can classify starved-worker
   vs DB-outage windows without new plumbing.
 ## v0.47 SEPTEMBER REMOVAL — ZeroEntropy (filed v0.46.3.0; TARGET: ship 2026-09-04..2026-09-08)
+
+<!-- 2026-08-29 fix-wave addenda for the removal executor:
+  (a) A post-sunset short-circuit now ships ahead of this wave (refs #3657):
+      past 2026-09-04 the rerank path skips the dead HTTP call, fails open,
+      writes one audit row per process per model (reason sunset_short_circuit)
+      and a once-per-process stderr line — so the removal wave inherits a loud,
+      latency-free interim state, not a 5s/query hang.
+  (b) Default-swap decision input from the issue thread: two independent
+      corpus reports found reranking actively HURT (2k-page personal brain —
+      three rerankers demoted short entity pages; 19k-page Japanese corpus —
+      zerank-2 itself 0/6 vs OFF). A/B the voyage default on a real corpus
+      before flipping; "disable in balanced" is a live option. tokenmax must
+      leave zerank regardless.
+  (c) The autocut_min_top re-tune requirement (outside-voice F16, filed at
+      the P2 calibration TODO above) binds to option (a)-style flips only. -->
+
 
 ZeroEntropy's hosted API dies 2026-09-04. v0.46.3.0 deprecated it (split-default:
 new installs → voyage; legacy runtime fallbacks stay ZE; detect-and-notify
