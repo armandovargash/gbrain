@@ -22,6 +22,7 @@ import * as os from 'os';
 import * as path from 'path';
 import {
   configureGateway,
+  resetGateway,
   rerank,
   RerankError,
   __setRerankTransportForTests,
@@ -115,6 +116,10 @@ afterEach(() => {
 
 afterAll(() => {
   _resetSunsetWarningsForTest();
+  // Serial-file hygiene: this suite reconfigures the module-global gateway
+  // (fake ZE/Voyage keys) per test — restore a clean gateway so nothing
+  // leaks into later files in the same process.
+  resetGateway();
 });
 
 describe('gateway.rerank post-sunset short-circuit (#3657)', () => {

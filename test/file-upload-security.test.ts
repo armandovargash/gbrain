@@ -132,6 +132,15 @@ describe('validatePageSlug', () => {
     expect(() => validatePageSlug('people/my_file_name')).not.toThrow();
   });
 
+  it('accepts underscore-LED segments the slugifier produces (Hugo _index shape, #4665)', () => {
+    // slugifySegment('_index') === '_index' — leading underscores survive
+    // sync, so the op boundary must round-trip them too. Dots stay
+    // continuation-only (the traversal fence is unchanged).
+    expect(() => validatePageSlug('notes/_index')).not.toThrow();
+    expect(() => validatePageSlug('_scratch/notes')).not.toThrow();
+    expect(() => validatePageSlug('notes/.hidden')).toThrow(OperationError);
+  });
+
   it('rejects dot-LED segments (dots are continuation-only)', () => {
     expect(() => validatePageSlug('notes/.hidden')).toThrow(OperationError);
     expect(() => validatePageSlug('.git/config')).toThrow(OperationError);

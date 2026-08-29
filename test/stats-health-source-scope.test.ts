@@ -169,6 +169,10 @@ function scopeAssertions(getEngine: () => BrainEngine) {
     // And the excluded source is visible again the moment it is granted.
     const widened = await engine.getStats({ sourceIds: [SRCA, SRCB] });
     expect(widened.page_count).toBe(before.page_count + 2);
+    // Restore the seed shape so later tests stay order-independent.
+    await engine.executeRaw(
+      `DELETE FROM pages WHERE slug = 'notes/hidden-growth' AND source_id = '${SRCB}'`,
+    );
   });
 }
 
@@ -222,7 +226,11 @@ describe('#4592 source-scoped stats/health (PGLite)', () => {
       auth: { token: 't', clientId: 'c', scopes: ['read', 'admin'], allowedSources: [SRCA, SRCB] },
     } as OperationContext;
     const stats = (await operationsByName.get_stats.handler(fed, {})) as { page_count: number };
-    expect(stats.page_count).toBe(4); // 3 seeded + hidden-growth from the differential test
+    // Compute the expectation from the engine so this test is independent of
+    // whatever mutations earlier tests performed (order-independence).
+    const expected = await engine.getStats({ sourceIds: [SRCA, SRCB] });
+    expect(stats.page_count).toBe(expected.page_count);
+    expect(stats.page_count).toBeGreaterThanOrEqual(3);
 
     const sentinel = { ...ctxBase(), sourceId: '__all__' } as OperationContext;
     const zeros = (await operationsByName.get_stats.handler(sentinel, {})) as { page_count: number };
@@ -232,7 +240,9 @@ describe('#4592 source-scoped stats/health (PGLite)', () => {
   test('trusted local (remote === false) keeps the brain-wide view, sentinel included', async () => {
     const local = { ...ctxBase(), remote: false, sourceId: '__all__' } as OperationContext;
     const stats = (await operationsByName.get_stats.handler(local, {})) as { page_count: number };
-    expect(stats.page_count).toBeGreaterThanOrEqual(4);
+    const brainWide = await engine.getStats();
+    expect(stats.page_count).toBe(brainWide.page_count);
+    expect(stats.page_count).toBeGreaterThanOrEqual(3);
   });
 });
 

@@ -1911,7 +1911,7 @@ async function embedAllStale(
         try {
           // SUP-3874: split legacy oversized chunk_text BEFORE the embed call.
           // `--stale` reuses stored rows; without this, one pre-cap chunk
-          // (e.g. notes/superaicoach-seo-implementation-plan on mxbai) fails
+          // (e.g. a long pre-cap notes page on a 512-token model) fails
           // forever and exits the sweep non-zero.
           const healed = await observed(pacer, () =>
             healOversizedPageChunks(engine, slug, {
