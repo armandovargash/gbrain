@@ -18,10 +18,15 @@ import { VERSION } from '../../version.ts';
 
 const get_stats: Operation = {
   name: 'get_stats',
-  description: 'Brain statistics (page count, chunk count, etc.)',
+  description: 'Brain statistics (page count, chunk count, etc.). Remote callers see counters confined to their source grant.',
   params: {},
   handler: async (ctx) => {
-    return ctx.engine.getStats();
+    // #4592: the #4433 ladder — trusted local CLI keeps the brain-wide view;
+    // every remote caller is confined to sourceScopeOpts(ctx) (federated
+    // array > scalar > the unmatchable __all__ sentinel, which fail-closes
+    // to zeros). Aggregates leak by subtraction, so they scope like reads.
+    const scope = ctx.remote === false ? {} : sourceScopeOpts(ctx);
+    return ctx.engine.getStats(scope);
   },
   scope: 'admin',
   cliHints: { name: 'stats' },
@@ -32,7 +37,12 @@ const get_health: Operation = {
   description: 'Brain health dashboard (embed coverage, stale pages, orphans). Includes a `migrations {pending, partial, wedged, skipped_future}` block from the host migration ledger so remote agents can detect wedged/outstanding host migrations without shelling into the brain host.',
   params: {},
   handler: async (ctx) => {
-    const health = await ctx.engine.getHealth();
+    // #4592: same ladder as get_stats. The `migrations` block below stays
+    // GLOBAL for scoped callers by decision: it is a host filesystem ledger
+    // with no per-source semantics, and a wedged host migration is exactly
+    // what a remote agent needs to see to explain degraded behavior.
+    const scope = ctx.remote === false ? {} : sourceScopeOpts(ctx);
+    const health = await ctx.engine.getHealth(scope);
     // TODOS:4063 — composed at the OP layer (not BrainEngine.getHealth):
     // the ledger is a filesystem JSONL, engine-agnostic; growing the engine
     // interface would force both engines to duplicate a file read.
@@ -70,7 +80,10 @@ const get_brain_identity: Operation = {
   description: 'Brain identity + counters for thin-client banner. Returns version, engine kind, and page/chunk counts. Read-scope.',
   params: {},
   handler: async (ctx) => {
-    const stats = await ctx.engine.getStats();
+    // #4592: read-scope + unscoped counters made this op the quiet third
+    // aggregate leak (the issue named only stats/health). Same ladder.
+    const scope = ctx.remote === false ? {} : sourceScopeOpts(ctx);
+    const stats = await ctx.engine.getStats(scope);
     // v0.42 self-upgrade: surface a pending update on the thin-client banner
     // (bonus channel; the CLI stderr marker + `gbrain self-upgrade` are the
     // load-bearing surface). Cache-read-only, no network, fail-open.

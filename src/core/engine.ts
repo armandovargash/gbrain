@@ -2215,8 +2215,16 @@ export interface BrainEngine {
   revertToVersion(slug: string, versionId: number, opts?: { sourceId?: string }): Promise<void>;
 
   // Stats + health
-  getStats(): Promise<BrainStats>;
-  getHealth(): Promise<BrainHealth>;
+  /**
+   * #4592: both diagnostics take an optional source scope (same shape as
+   * sourceScopeOpts). Omitted = brain-wide (trusted local). Scoped = EVERY
+   * counter/coverage/degree confines to the grant — including derived-table
+   * counts via their page joins, and link-derived numbers only when BOTH
+   * endpoints are in scope — so an excluded source's numbers can't be
+   * recovered by subtraction.
+   */
+  getStats(opts?: { sourceId?: string; sourceIds?: string[] }): Promise<BrainStats>;
+  getHealth(opts?: { sourceId?: string; sourceIds?: string[] }): Promise<BrainHealth>;
 
   // Ingest log
   logIngest(entry: IngestLogInput): Promise<void>;
