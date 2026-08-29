@@ -18,6 +18,7 @@
 import { describe, test, expect, beforeAll, afterAll, beforeEach } from 'bun:test';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { makeEmbedBackfillHandler } from '../src/core/minions/handlers/embed-backfill.ts';
+import { withEnv } from './helpers/with-env.ts';
 import { tryAcquireDbLock } from '../src/core/db-lock.ts';
 import type { MinionJobContext } from '../src/core/minions/types.ts';
 import { configureGateway, getCurrentBudgetTracker, resetGateway } from '../src/core/ai/gateway.ts';
@@ -412,9 +413,7 @@ describe('embed-backfill handler — #4571 unpriced embedding models', () => {
     // the wedged-drain shape and previously had NO watchdog (it bypasses
     // runEmbedCore). Wedge the drain: it honors the abort signal (as the
     // real embedStaleForSource does) but otherwise never settles.
-    const prevStall = process.env.GBRAIN_EMBED_STALL_ABORT_SECONDS;
-    process.env.GBRAIN_EMBED_STALL_ABORT_SECONDS = '1';
-    try {
+    await withEnv({ GBRAIN_EMBED_STALL_ABORT_SECONDS: '1' }, async () => {
       const handler = makeEmbedBackfillHandler(engine, {
         runStale: async (_e, _s, opts) =>
           await new Promise((resolve) => {
@@ -424,10 +423,7 @@ describe('embed-backfill handler — #4571 unpriced embedding models', () => {
           }),
       });
       await expect(handler(fakeJob({ sourceId: 'default' }))).rejects.toThrow(/stall_timeout/);
-    } finally {
-      if (prevStall === undefined) delete process.env.GBRAIN_EMBED_STALL_ABORT_SECONDS;
-      else process.env.GBRAIN_EMBED_STALL_ABORT_SECONDS = prevStall;
-    }
+    });
   }, 20_000);
 
   test("cap value 'off' still removes the ceiling entirely (not misconfiguration)", async () => {
