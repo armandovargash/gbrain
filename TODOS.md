@@ -62,6 +62,10 @@
   a doctor/lint check listing pages whose slug fails validatePageSlug (Dream
   historically wrote space-slugs; those rows are now un-updatable via
   put_page) with rename guidance.
+- [ ] **P3 — engine-parity e2e open_loops reset.** **What:** the parity suite
+  doesn't reset open_loops between runs, so a leftover row in a shared
+  DATABASE_URL database flakes the round-trip test (observed during #4587
+  verification; fresh DB → green). Add a per-run cleanup or unique key.
 
 ## Schema-bootstrap coverage follow-ups (filed 2026-08-29, follow-up from the #4657 P0 fix)
 

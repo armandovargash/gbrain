@@ -144,9 +144,28 @@ Semantics:
 - Models with neither a table row nor an override stay fail-closed under a cap.
 - Invalid entries (negative, non-numeric) are dropped; those models keep the
   fail-closed behavior.
-- Consumed by `BudgetTracker` construction (enrich and the cycle's
-  `enrich_thin` phase load it automatically); both chat and embed routes price
-  through it.
+- Consumed by `BudgetTracker` construction; both chat and embed routes price
+  through it. The key is registered in `KNOWN_CONFIG_KEYS`, and it is loaded
+  automatically by enrich and the cycle's `enrich_thin` phase, the
+  `embed-backfill` job handler, and every conversation-facts entry point
+  (`gbrain extract-conversation-facts`, the cycle's
+  `conversation_facts_backfill` phase, transcript facts ingest) — an override
+  declared once in config reaches the queued/background lanes too, not just
+  interactive enrich.
+
+### Default caps vs unpriced models (embed backfill)
+
+The `embed-backfill` job's per-job cap defaults to $10 — an IMPLICIT ceiling
+nobody chose. When the configured embedding model has no shipped pricing row
+and no `pricing.overrides` entry (the `isModelPriceable` contract), enforcing
+that implicit cap would fail-close every job for a model that may well be
+free or self-hosted. So the handler drops the DEFAULT cap and runs uncapped,
+with a stderr warning naming both fixes (add a `pricing.overrides` entry, or
+set `embed.backfill_max_usd` to an explicit number). An EXPLICIT cap is a
+different contract: you chose a ceiling, so an unpriced model stays
+fail-closed (`no_pricing`) — declare the model's rate in `pricing.overrides`
+to proceed. Spend is ledgered by the tracker either way; only the ceiling
+changes.
 
 ## Escape hatches at a glance
 
