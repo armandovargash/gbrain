@@ -170,6 +170,44 @@ describe('findBacklinkGaps — extension-less backlink credit (#1776)', () => {
     }
   });
 
+  test('double-run: a second gap→fix→re-scan loop inserts NOTHING (byte-identical pages)', async () => {
+    // The real production loop is find → fix → re-scan. Run it twice over a
+    // page that has a timeline region: the second pass must find zero gaps
+    // and leave every byte alone — no duplicate rows, no second
+    // '## Referenced by' heading, no drift of the timeline boundary.
+    const root = makeRoot();
+    const lockRoot = join(root, '.locks');
+    try {
+      fs.writeFileSync(join(root, 'meetings/standup.md'), '# Standup\n\nSaw [Alice](../people/alice).\n');
+      fs.writeFileSync(
+        join(root, 'people/alice.md'),
+        '# Alice\n\n## History\n\n- **2025-12-03** | meeting — Kickoff\n',
+      );
+
+      // Loop 1: one gap, fixed.
+      const gaps1 = findBacklinkGaps(root);
+      expect(gaps1).toHaveLength(1);
+      const outcome1 = await fixBacklinkGaps(root, gaps1, false, { lockRoot });
+      expect(outcome1.fixed).toBe(1);
+      const afterFirst = readFileSync(join(root, 'people/alice.md'), 'utf-8');
+      expect(afterFirst).toContain('- Referenced in [Standup](../meetings/standup)');
+      // The section landed ABOVE the History region.
+      expect(afterFirst.indexOf('## Referenced by')).toBeLessThan(afterFirst.indexOf('## History'));
+
+      // Loop 2: the re-scan credits the fixer's own row → zero gaps, and a
+      // second fix pass (even fed the ORIGINAL gap list) writes nothing new.
+      const gaps2 = findBacklinkGaps(root);
+      expect(gaps2).toHaveLength(0);
+      await fixBacklinkGaps(root, gaps2, false, { lockRoot });
+      const afterSecond = readFileSync(join(root, 'people/alice.md'), 'utf-8');
+      expect(afterSecond).toBe(afterFirst);
+      expect(afterSecond.match(/^## Referenced by$/gm)).toHaveLength(1);
+      expect(afterSecond.match(/- Referenced in \[Standup\]/g)).toHaveLength(1);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test('fix then check → 0 gaps for a root-level source page (.md row, legacy credit)', async () => {
     const root = makeRoot();
     const lockRoot = join(root, '.locks');
@@ -367,6 +405,32 @@ describe('insertBacklinkEntry', () => {
     const out = insertBacklinkEntry(content, 0, '- new');
     expect(out).toContain('## Referenced by\r\n\r\n- new\r\n\r\n## Timeline');
     expect(out.indexOf('- new')).toBeLessThan(out.indexOf('## Timeline'));
+  });
+
+  test('## History is a timeline-region boundary: the section lands BEFORE it', () => {
+    // The bare-heading fallback matches History alongside Timeline — a page
+    // that keeps its dated log under `## History` must not get backlink rows
+    // appended INTO that region.
+    const content = `# Alice\n\n## History\n\n- **2025-12-03** | meeting — Kickoff\n`;
+    const out = insertBacklinkEntry(content, 0, '- entry');
+    expect(out).toContain('## Referenced by\n\n- entry\n\n## History');
+    expect(out.indexOf('- entry')).toBeLessThan(out.indexOf('## History'));
+  });
+
+  test('lowercase ## timeline matches the boundary (case-insensitive heading regex)', () => {
+    const content = `# Alice\n\n## timeline\n\n- **2025-12-03** | meeting — Kickoff\n`;
+    const out = insertBacklinkEntry(content, 0, '- entry');
+    expect(out).toContain('## Referenced by\n\n- entry\n\n## timeline');
+    expect(out.indexOf('- entry')).toBeLessThan(out.indexOf('## timeline'));
+  });
+
+  test('dashed `--- timeline ---` sentinel is a boundary: section placed before it', () => {
+    // findTimelineSplitIndex's rule-2 sentinel form — takes precedence over
+    // any bare heading, so the section must land ABOVE the dashes.
+    const content = `# Alice\n\nBody prose.\n\n--- timeline ---\n\n- **2025-12-03** | meeting — Kickoff\n`;
+    const out = insertBacklinkEntry(content, 0, '- new');
+    expect(out).toContain('## Referenced by\n\n- new\n\n--- timeline ---');
+    expect(out.indexOf('- new')).toBeLessThan(out.indexOf('--- timeline ---'));
   });
 });
 

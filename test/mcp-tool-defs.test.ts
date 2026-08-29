@@ -122,6 +122,23 @@ describe('buildToolDefs', () => {
       expect(description).toContain('include_content:true');
     }
   });
+
+  test('GBRAIN_MCP_INSTRUCTIONS carries the same put_page contract phrases (triple-home tie)', async () => {
+    // The whole-page-replacement contract lives in THREE client-visible homes:
+    // the put_page tool description, its content-param description (both
+    // pinned above), and the initialize-handshake instructions. A client that
+    // reads only the instructions must get the same guidance — this ties the
+    // third home to the same phrase set so they cannot drift apart.
+    const { GBRAIN_MCP_INSTRUCTIONS } = await import('../src/mcp/instructions.ts');
+    for (const phrase of [
+      'REPLACES the entire page',
+      'not a partial edit',
+      'get_page',
+      'include_content:true',
+    ]) {
+      expect(GBRAIN_MCP_INSTRUCTIONS).toContain(phrase);
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------

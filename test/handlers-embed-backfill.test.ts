@@ -339,4 +339,66 @@ describe('embed-backfill handler — #4571 unpriced embedding models', () => {
     expect(result.budgetCapUsd).toBe(10);
     expect(result.spentUsd).toBe(0);
   });
+
+  // Mutant-killer: the uncapped-with-warning escape applies ONLY when the
+  // model cannot be priced. A capForModel that returns undefined whenever
+  // the cap is DEFAULTED (not just defaulted+unpriced) passes every test
+  // above — this one proves the implicit $10 default still ENFORCES once
+  // pricing.overrides make the model priceable.
+  test('defaulted $10 cap still enforces for a PRICED model (config unset + pricing.overrides)', async () => {
+    configureUnpricedEmbeddingModel();
+    // embed.backfill_max_usd stays UNSET (beforeEach unsets it) → implicit
+    // $10 default; the override makes openai:bge-m3 priceable at $0.5/M.
+    await engine.setConfig('pricing.overrides', '{"openai:bge-m3":0.5}');
+    let drainRanToCompletion = false;
+    const handler = makeEmbedBackfillHandler(engine, {
+      runStale: async () => {
+        const tracker = getCurrentBudgetTracker();
+        if (!tracker) throw new Error('missing BudgetTracker scope');
+        // 30M tokens at $0.5/M = $15 > the $10 default → must throw.
+        tracker.reserve({
+          modelId: 'openai:bge-m3',
+          estimatedInputTokens: 30_000_000,
+          maxOutputTokens: 0,
+          kind: 'embed',
+        });
+        tracker.record({ modelId: 'openai:bge-m3', inputTokens: 30_000_000, kind: 'embed' });
+        drainRanToCompletion = true;
+        return { ...drainBase, embedded: 1, chunksProcessed: 1 };
+      },
+    });
+
+    const result = await handler(fakeJob({ sourceId: 'default' }));
+    expect(result.status).toBe('budget_exhausted');
+    expect(result.budgetCapUsd).toBe(10);
+    expect(drainRanToCompletion).toBe(false);
+  });
+
+  // Garbage cannot be an operator's ceiling: parseUsdLimit falls back to the
+  // $10 default AND the value is classified as IMPLICIT (defaulted), so with
+  // an unpriced model the cap is dropped-with-warning rather than failing
+  // closed the way an explicit numeric cap does.
+  test("garbage explicit cap ('garbage') classifies as implicit: unpriced model runs uncapped", async () => {
+    configureUnpricedEmbeddingModel();
+    await engine.setConfig('embed.backfill_max_usd', 'garbage');
+    const handler = makeEmbedBackfillHandler(engine, {
+      runStale: async () => {
+        const tracker = getCurrentBudgetTracker();
+        if (!tracker) throw new Error('missing BudgetTracker scope');
+        tracker.reserve({
+          modelId: 'openai:bge-m3',
+          estimatedInputTokens: 1_000_000,
+          maxOutputTokens: 0,
+          kind: 'embed',
+        });
+        tracker.record({ modelId: 'openai:bge-m3', inputTokens: 1_000_000, kind: 'embed' });
+        return { ...drainBase, embedded: 1, chunksProcessed: 1 };
+      },
+    });
+
+    const result = await handler(fakeJob({ sourceId: 'default' }));
+    expect(result.status).toBe('success');
+    expect(result.embedded).toBe(1);
+    expect(result.budgetCapUsd).toBeUndefined();
+  });
 });
