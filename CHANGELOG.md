@@ -62,6 +62,9 @@ contributor fixes land with full credit.**
 - **Backlink repair no longer forges dates.** Repaired references land as
   undated entries in a "Referenced by" section instead of timeline events
   stamped with the repair run's date.
+- **`gbrain models` now reports the dream extract-atoms route**
+  (`models.dream.extract_atoms`) with the same narrow resolver the runtime
+  uses, so the dashboard can't disagree with actual routing.
 - **Dead-reranker latency removed ahead of the provider sunset.** The default
   hosted reranker's provider shuts down on 2026-09-04; past that date the
   search path skips the dead call entirely (no more multi-second timeout per
@@ -75,6 +78,12 @@ contributor fixes land with full credit.**
 
 - The schema-bootstrap diagnostic line names what it found (a forward-
   reference gap) instead of mislabeling newer brains as "pre-v0.21".
+
+With thanks to the contributors whose pull requests this wave adopts:
+@luccasapucaiaia-code, @ruiwang20010702, @Masashi-Ono0611, @Natetgmaxwell,
+@original4422, @javieraldape, @levineam, @henriquedamota, @boundless-forest,
+@aniruddhaadak80, and @mvanhorn — and to the reporters whose verified issues
+drove the direct fixes.
 
 ## To take advantage of v0.47.6.0
 
