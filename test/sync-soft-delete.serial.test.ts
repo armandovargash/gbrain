@@ -321,3 +321,111 @@ describe('#4587 E1: rename lane meeting a soft-deleted row', () => {
     expect(Number(live[0].n)).toBe(1);
   });
 });
+
+describe('#4587: full-sync reconcile + unsyncable lane are SOFT, purge window is honored end-to-end', () => {
+  test('full-sync reconcile: a DB row whose file is gone gets deleted_at set — the row EXISTS, not absent', async () => {
+    const repo = mkRepo({
+      'topics/keep.md': '# Keep\n\nstays on disk\n',
+      'topics/gone.md': '# Gone\n\nfile will disappear\n',
+    });
+    await performSync(engine, { repoPath: repo, ...SYNC_OPTS });
+    expect((await rowState('topics/gone')).exists).toBe(true);
+
+    // The file disappears from disk AND from the commit history tip.
+    execSync('git rm -q topics/gone.md', { cwd: repo, stdio: 'pipe' });
+    commitAll(repo, 'remove gone');
+
+    // Force the RECONCILE lane (not the incremental removed-file drain).
+    const result = await performSync(engine, { repoPath: repo, ...SYNC_OPTS, full: true });
+    expect(result.status).not.toBe('blocked_by_failures');
+
+    // The pin: reconcile soft-deletes. Pre-#4587 this row was HARD-deleted.
+    const gone = await rowState('topics/gone');
+    expect(gone.exists).toBe(true);
+    expect(gone.softDeleted).toBe(true);
+    // Recoverable through the includeDeleted read surface.
+    const tombstoned = await engine.getPage('topics/gone', { sourceId: 'default', includeDeleted: true });
+    expect(tombstoned).not.toBeNull();
+    expect(tombstoned!.deleted_at).not.toBeNull();
+    // The sibling was not collateral damage.
+    const keep = await rowState('topics/keep');
+    expect(keep.exists).toBe(true);
+    expect(keep.softDeleted).toBe(false);
+  });
+
+  test('unsyncable lane: a swept poisoned-filename page is soft-deleted — row exists with a tombstone', async () => {
+    const JUNK_NAME = '[foo.md](https-example).md';
+    const JUNK_SLUG = 'atoms/foo-md-https-example';
+    const repo = mkRepo({ 'notes/base.md': '# Base\n\ncommitted\n' });
+    await performSync(engine, { repoPath: repo, ...SYNC_OPTS });
+
+    // The junk file lands (skipped from import — malformed path)…
+    writeFileSync(join(repo, JUNK_NAME), '# junk\n');
+    commitAll(repo, 'junk lands');
+    await performSync(engine, { repoPath: repo, ...SYNC_OPTS });
+
+    // …but a pre-gate gbrain had already ingested it (seed the poisoned row).
+    await engine.putPage(JUNK_SLUG, {
+      type: 'note',
+      title: 'Poisoned page',
+      compiled_truth: 'Junk row ingested before the malformed-path gate existed.',
+      timeline: '',
+      frontmatter: { type: 'note' },
+    });
+    await engine.executeRaw(`UPDATE pages SET source_path = $1 WHERE slug = $2`, [JUNK_NAME, JUNK_SLUG]);
+
+    // A MODIFIED junk file routes through the unsyncable cleanup lane.
+    writeFileSync(join(repo, JUNK_NAME), '# junk edited\n');
+    commitAll(repo, 'edit junk');
+    const result = await performSync(engine, { repoPath: repo, ...SYNC_OPTS });
+    expect(result.status).not.toBe('blocked_by_failures');
+
+    // The pin: swept via softDeletePages — EXISTS + tombstone, not absent.
+    // (test/sync-malformed-path.serial.test.ts only asserts not-live, which a
+    // hard delete would also satisfy.)
+    const swept = await rowState(JUNK_SLUG);
+    expect(swept.exists).toBe(true);
+    expect(swept.softDeleted).toBe(true);
+  });
+
+  test('purge after the 72h window: cycle purge hard-deletes a 73h sync tombstone; a 71h one survives', async () => {
+    const repo = mkRepo({
+      'notes/old.md': '# Old\n\nwill age past the window\n',
+      'notes/recent.md': '# Recent\n\nstays inside the window\n',
+      'notes/live.md': '# Live\n\nnever deleted\n',
+    });
+    await performSync(engine, { repoPath: repo, ...SYNC_OPTS });
+
+    execSync('git rm -q notes/old.md notes/recent.md', { cwd: repo, stdio: 'pipe' });
+    commitAll(repo, 'remove both');
+    await performSync(engine, { repoPath: repo, ...SYNC_OPTS });
+    expect((await rowState('notes/old')).softDeleted).toBe(true);
+    expect((await rowState('notes/recent')).softDeleted).toBe(true);
+
+    // Backdate the sync-originated tombstones: one past 72h, one inside it.
+    await engine.executeRaw(
+      `UPDATE pages SET deleted_at = now() - INTERVAL '73 hours' WHERE source_id = 'default' AND slug = 'notes/old'`,
+    );
+    await engine.executeRaw(
+      `UPDATE pages SET deleted_at = now() - INTERVAL '71 hours' WHERE source_id = 'default' AND slug = 'notes/recent'`,
+    );
+
+    // The CYCLE purge phase owns the eventual hard delete (72h constant).
+    const { runCycle } = await import('../src/core/cycle.ts');
+    const report = await runCycle(engine, { brainDir: null, phases: ['purge'] });
+    const purgePhase = report.phases.find((p) => p.phase === 'purge');
+    expect(purgePhase).toBeDefined();
+    expect(purgePhase!.status).not.toBe('failed');
+
+    // 73h: HARD-gone — the row no longer exists at all.
+    expect((await rowState('notes/old')).exists).toBe(false);
+    // 71h: still recoverable — exists, tombstoned, untouched by the purge.
+    const recent = await rowState('notes/recent');
+    expect(recent.exists).toBe(true);
+    expect(recent.softDeleted).toBe(true);
+    // Live rows are never purge candidates.
+    const live = await rowState('notes/live');
+    expect(live.exists).toBe(true);
+    expect(live.softDeleted).toBe(false);
+  }, 30_000);
+});

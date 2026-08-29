@@ -214,3 +214,129 @@ describe('sync.exclude config is honored on the very first sync (full-walk path)
     expect(await fsPageExists('raw/deep/leaf')).toBe(false);
   }, 60_000);
 });
+
+/**
+ * Wave-audit pins: multi-pattern parsing (commas AND newlines in one value),
+ * the conservative posture (exclusion never deletes previously-imported
+ * pages — not on incremental syncs, not on the full-sync reconcile), and the
+ * getConfig THROW branch (an unreadable config degrades to "no persisted
+ * scope applied", never a failed sync). Fresh engine + repo so the ordering
+ * games of the describes above can't leak in.
+ */
+describe('sync.exclude — multi-pattern value, conservative posture, getConfig throw', () => {
+  let mpEngine: PGLiteEngine;
+  let mpRepoPath: string;
+  const MP_SOURCE_ID = 'testsrc-excl-multi';
+
+  function mpCommitAll(msg: string): void {
+    execSync('git add -A', { cwd: mpRepoPath, stdio: 'pipe' });
+    execSync(`git commit -m "${msg}"`, { cwd: mpRepoPath, stdio: 'pipe' });
+  }
+
+  async function mpPageExists(slug: string): Promise<boolean> {
+    const rows = await mpEngine.executeRaw<{ n: number }>(
+      `SELECT COUNT(*)::int AS n FROM pages WHERE slug = $1 AND source_id = $2 AND deleted_at IS NULL`,
+      [slug, MP_SOURCE_ID],
+    );
+    return Number(rows[0]?.n ?? 0) > 0;
+  }
+
+  const mpOpts = () => ({
+    repoPath: mpRepoPath,
+    sourceId: MP_SOURCE_ID,
+    noPull: true,
+    noEmbed: true,
+    noExtract: true,
+  });
+
+  beforeAll(async () => {
+    mpEngine = new PGLiteEngine();
+    await mpEngine.connect({});
+    await mpEngine.initSchema();
+    await runSources(mpEngine, ['add', MP_SOURCE_ID, '--no-federated']);
+
+    mpRepoPath = mkdtempSync(join(tmpdir(), 'gbrain-excl-multi-'));
+    execSync('git init', { cwd: mpRepoPath, stdio: 'pipe' });
+    execSync('git config user.email "t@t.com"', { cwd: mpRepoPath, stdio: 'pipe' });
+    execSync('git config user.name "T"', { cwd: mpRepoPath, stdio: 'pipe' });
+    mkdirSync(join(mpRepoPath, 'notes'), { recursive: true });
+    mkdirSync(join(mpRepoPath, 'raw'), { recursive: true });
+    writeFileSync(join(mpRepoPath, 'notes/base.md'), '# Base\n\ncommitted\n');
+    // Imported BEFORE any exclusion exists — the conservative-posture subject.
+    writeFileSync(join(mpRepoPath, 'raw/pre.md'), '# Pre\n\nimported before the scope\n');
+    mpCommitAll('base + pre');
+
+    const first = await performSync(mpEngine, mpOpts());
+    expect(first.status).toBe('first_sync');
+    expect(await mpPageExists('raw/pre')).toBe(true);
+  }, 120_000);
+
+  afterAll(async () => {
+    if (mpEngine) await mpEngine.disconnect();
+    if (mpRepoPath) rmSync(mpRepoPath, { recursive: true, force: true });
+  }, 60_000);
+
+  test("a mixed comma+newline value ('raw/, tmp/\\nlogs/') excludes all three subtrees", async () => {
+    await mpEngine.setConfig('sync.exclude', 'raw/, tmp/\nlogs/');
+
+    mkdirSync(join(mpRepoPath, 'tmp'), { recursive: true });
+    mkdirSync(join(mpRepoPath, 'logs'), { recursive: true });
+    writeFileSync(join(mpRepoPath, 'raw/a.md'), '# A\n\nexcluded (comma-separated)\n');
+    writeFileSync(join(mpRepoPath, 'tmp/b.md'), '# B\n\nexcluded (comma then newline)\n');
+    writeFileSync(join(mpRepoPath, 'logs/c.md'), '# C\n\nexcluded (newline-separated)\n');
+    writeFileSync(join(mpRepoPath, 'notes/keep.md'), '# Keep\n\nindexed\n');
+    mpCommitAll('multi-pattern candidates');
+
+    const result = await performSync(mpEngine, mpOpts());
+    expect(result.status).toBe('synced');
+
+    expect(await mpPageExists('raw/a')).toBe(false);
+    expect(await mpPageExists('tmp/b')).toBe(false);
+    expect(await mpPageExists('logs/c')).toBe(false);
+    expect(await mpPageExists('notes/keep')).toBe(true);
+  }, 60_000);
+
+  test('conservative posture: a page imported BEFORE the exclusion stays LIVE across syncs, incl. full-sync reconcile', async () => {
+    // raw/pre was imported before sync.exclude covered raw/. Exclusion gates
+    // IMPORTS only — it must never delete (or soft-delete) an existing page.
+    // Incremental pass (ran in the previous test) left it live:
+    expect(await mpPageExists('raw/pre')).toBe(true);
+
+    // And the full-sync reconcile must not treat "excluded but on disk" as
+    // "file removed" (the reconcile's currentFiles walk carries no exclude).
+    const full = await performSync(mpEngine, { ...mpOpts(), full: true });
+    expect(['synced', 'up_to_date', 'first_sync']).toContain(full.status);
+
+    expect(await mpPageExists('raw/pre')).toBe(true);
+    const tombstone = await mpEngine.executeRaw<{ deleted_at: string | null }>(
+      `SELECT deleted_at FROM pages WHERE slug = 'raw/pre' AND source_id = $1`,
+      [MP_SOURCE_ID],
+    );
+    expect(tombstone).toHaveLength(1);
+    expect(tombstone[0]!.deleted_at).toBeNull();
+  }, 60_000);
+
+  test('getConfig THROWING degrades to no-persisted-scope: sync completes and the scope is NOT applied', async () => {
+    // The catch branch proper — distinct from the empty-string case the
+    // first describe covers. The persisted 'raw/…' scope is still in config,
+    // but the read blows up, so this run must behave as if no scope existed.
+    const originalGetConfig = mpEngine.getConfig.bind(mpEngine);
+    mpEngine.getConfig = (async (key: string): Promise<string | null> => {
+      if (key === 'sync.exclude') throw new Error('config table unavailable (injected)');
+      return originalGetConfig(key);
+    }) as typeof mpEngine.getConfig;
+
+    try {
+      writeFileSync(join(mpRepoPath, 'raw/late.md'), '# Late\n\nimported because the scope read failed\n');
+      mpCommitAll('late raw file');
+
+      const result = await performSync(mpEngine, mpOpts());
+      // 1. The sync COMPLETED (never break a sync over the scope read).
+      expect(result.status).toBe('synced');
+      // 2. No persisted scope was applied: the raw/ file imported.
+      expect(await mpPageExists('raw/late')).toBe(true);
+    } finally {
+      mpEngine.getConfig = originalGetConfig;
+    }
+  }, 60_000);
+});
