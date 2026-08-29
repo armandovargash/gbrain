@@ -65,6 +65,9 @@ contributor fixes land with full credit.**
 - **`gbrain models` now reports the dream extract-atoms route**
   (`models.dream.extract_atoms`) with the same narrow resolver the runtime
   uses, so the dashboard can't disagree with actual routing.
+- **The conversation-parser nightly probe reports the real blocker.** When no
+  chat model is available it says so, instead of misreporting a missing
+  Anthropic key (thanks @ruiwang20010702, #4639).
 - **Dead-reranker latency removed ahead of the provider sunset.** The default
   hosted reranker's provider shuts down on 2026-09-04; past that date the
   search path skips the dead call entirely (no more multi-second timeout per

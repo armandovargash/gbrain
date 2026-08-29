@@ -44,7 +44,8 @@ The USD-limit knobs accept `off`, `unlimited`, or `none` (case-insensitive) to m
   `embed.backfill_max_usd` specifically, any present-but-invalid value (`0`, a
   negative, garbage text) is treated as a typo'd cap: the $10 default applies and is
   **never dropped**, even for unpriced models (see "Default caps vs unpriced models"
-  below). Only `off` removes that ceiling.
+  below). Only the off tokens (`off`/`unlimited`/`none`, case-insensitive) remove
+  that ceiling.
 - Internally "no limit" is the string `unlimited` in any printed/JSON output and "no
   cap" inside the budget tracker — never a raw `Infinity` (which would serialize to
   `null` in ledger rows).
@@ -85,9 +86,12 @@ underestimate an explicit working-tree run.
 
 Behavior above the floor:
 - **TTY:** prompts `[y/N]`.
-- **Non-interactive (cron/agent):** **auto-defers** embeds to capped backfill jobs and
-  exits 0 — it never wedges the pipeline. The backlog drains via the jobs worker or
-  `gbrain embed --stale`. Pass `--yes` to embed inline instead.
+- **Non-interactive (cron/agent):** **auto-defers** embeds (rows stay stale; exits 0 —
+  it never wedges the pipeline). A capped backfill job is submitted only when a
+  worker-backed surface exists; otherwise the result reports
+  `manual_drain_required` (`reason: no_worker_surface` on PGLite/no-worker setups, or
+  `auto_submit_disabled`) with the paste-ready drain command. The backlog drains via
+  the jobs worker or `gbrain embed --stale`. Pass `--yes` to embed inline instead.
 
 Output format splits on the explicit `--json` flag: `--json` emits a structured
 envelope; otherwise human text. Every gate message carries paste-ready knobs.

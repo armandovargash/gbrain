@@ -4196,7 +4196,11 @@ follow-ups, captured here so v0.42 starts informed.
   `embedding_coverage`. Requires repro of the original 890K embed failure
   on current code FIRST to confirm whether it's batch-overflow vs
   single-oversized-chunk vs token-estimate-miss. Effort: human ~2 days /
-  CC ~3 hours.
+  CC ~3 hours. SCOPE NARROWED (v0.47.x fix wave): the single-oversized-chunk
+  branch is now healed in place by `src/core/embed-oversize-heal.ts`
+  (split-on-detect, shared by CLI embed + embed --stale), so that case no
+  longer perma-fails a stale sweep; remaining scope is batch-overflow /
+  token-estimate-miss + `TokenLimitError` quarantine.
 
 - [ ] **v0.42 P1 — Source-repo remediation surface.** Codex r1 #7
   caught: cleanup CLI that deletes DB rows doesn't fix source of truth
