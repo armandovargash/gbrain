@@ -281,4 +281,62 @@ describe('embed-backfill handler — #4571 unpriced embedding models', () => {
     const result = await handler(fakeJob({ sourceId: 'default' }));
     expect(result.status).toBe('success');
   });
+
+  // X10 boundary (cost-safety): uncapped-with-warning applies ONLY to the
+  // IMPLICIT $10 default cap. An EXPLICIT operator cap with an unpriced model
+  // must fail closed (TX2 no_pricing) — the operator asked for a ceiling we
+  // cannot enforce, so we refuse the work instead of running blind.
+  test('explicit user cap with an unpriced model fails closed (budget_exhausted, no work)', async () => {
+    configureUnpricedEmbeddingModel();
+    await engine.setConfig('embed.backfill_max_usd', '2');
+    let drainRanToCompletion = false;
+    const handler = makeEmbedBackfillHandler(engine, {
+      runStale: async () => {
+        const tracker = getCurrentBudgetTracker();
+        if (!tracker) throw new Error('missing BudgetTracker scope');
+        // TX2: reserve() must throw BEFORE any provider call is possible.
+        tracker.reserve({
+          modelId: 'openai:bge-m3',
+          estimatedInputTokens: 1_000_000,
+          maxOutputTokens: 0,
+          kind: 'embed',
+        });
+        drainRanToCompletion = true;
+        return { ...drainBase, embedded: 1, chunksProcessed: 1 };
+      },
+    });
+
+    const result = await handler(fakeJob({ sourceId: 'default' }));
+    expect(result.status).toBe('budget_exhausted');
+    expect(result.budgetCapUsd).toBe(2);
+    expect(result.spentUsd).toBe(0);
+    expect(result.embedded).toBe(0);
+    expect(drainRanToCompletion).toBe(false);
+  });
+
+  // Same boundary, subtle corner: an explicit cap NUMERICALLY EQUAL to the
+  // $10 default is still explicit — it must NOT be misclassified as the
+  // implicit default and silently dropped for unpriced models.
+  test('explicit cap equal to the $10 default still fails closed for unpriced models', async () => {
+    configureUnpricedEmbeddingModel();
+    await engine.setConfig('embed.backfill_max_usd', '10');
+    const handler = makeEmbedBackfillHandler(engine, {
+      runStale: async () => {
+        const tracker = getCurrentBudgetTracker();
+        if (!tracker) throw new Error('missing BudgetTracker scope');
+        tracker.reserve({
+          modelId: 'openai:bge-m3',
+          estimatedInputTokens: 1_000_000,
+          maxOutputTokens: 0,
+          kind: 'embed',
+        });
+        return { ...drainBase, embedded: 1, chunksProcessed: 1 };
+      },
+    });
+
+    const result = await handler(fakeJob({ sourceId: 'default' }));
+    expect(result.status).toBe('budget_exhausted');
+    expect(result.budgetCapUsd).toBe(10);
+    expect(result.spentUsd).toBe(0);
+  });
 });
