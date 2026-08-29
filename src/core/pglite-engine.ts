@@ -1876,6 +1876,29 @@ export class PGLiteEngine implements BrainEngine {
     return { slug: (rows[0] as { slug: string }).slug };
   }
 
+  /**
+   * #4587 — batch soft-delete primitive. See BrainEngine.softDeletePages
+   * JSDoc. Parity implementation with PostgresEngine.softDeletePages:
+   * deletePages' shape (empty-array early-return, batch-size throw,
+   * RETURNING slug) with softDeletePage's `deleted_at IS NULL` idempotency
+   * predicate. Nothing cascades — the 72h purge phase owns the eventual
+   * hard delete. PGLite binds `slug = ANY($1)` array params natively
+   * (deletePages already proves this).
+   */
+  async softDeletePages(slugs: string[], opts: { sourceId: string }): Promise<string[]> {
+    if (slugs.length === 0) return [];
+    if (slugs.length > DELETE_BATCH_SIZE) {
+      throw new Error(
+        `softDeletePages: input size ${slugs.length} exceeds DELETE_BATCH_SIZE=${DELETE_BATCH_SIZE}. Caller must chunk.`,
+      );
+    }
+    const { rows } = await this.db.query<{ slug: string }>(
+      'UPDATE pages SET deleted_at = now() WHERE slug = ANY($1::text[]) AND source_id = $2 AND deleted_at IS NULL RETURNING slug',
+      [slugs, opts.sourceId],
+    );
+    return rows.map(r => r.slug);
+  }
+
   async restorePage(slug: string, opts?: { sourceId?: string }): Promise<boolean> {
     const sourceId = opts?.sourceId;
     const where: string[] = ['slug = $1', 'deleted_at IS NOT NULL'];

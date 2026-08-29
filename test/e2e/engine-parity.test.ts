@@ -709,6 +709,78 @@ describeBoth('Engine parity — Postgres vs PGLite', () => {
     }
   });
 
+  test('#4587 softDeletePages parity: same confirmed-transitioned slugs; ghosts + already-soft-deleted excluded; rows stay recoverable', async () => {
+    const realSlugs = ['wiki/sdp-1', 'wiki/sdp-2', 'wiki/sdp-3'];
+    for (const eng of [pgEngine, pgliteEngine]) {
+      for (const slug of realSlugs) {
+        await eng.putPage(slug, { type: 'note', title: slug, compiled_truth: 'body', timeline: '' });
+      }
+      // Pre-soft-delete one row: the batch must not re-flip it (deleted_at
+      // IS NULL predicate — re-flipping would restart its 72h purge clock).
+      await eng.softDeletePage('wiki/sdp-3', { sourceId: 'default' });
+    }
+
+    const allSlugs = [...realSlugs, 'wiki/sdp-ghost'];
+    const pgFlipped = await pgEngine.softDeletePages(allSlugs, { sourceId: 'default' });
+    const pgliteFlipped = await pgliteEngine.softDeletePages(allSlugs, { sourceId: 'default' });
+
+    expect(pgFlipped.sort()).toEqual(['wiki/sdp-1', 'wiki/sdp-2']);
+    expect(pgliteFlipped.sort()).toEqual(['wiki/sdp-1', 'wiki/sdp-2']);
+
+    for (const eng of [pgEngine, pgliteEngine]) {
+      // Hidden from default reads, but the rows remain (recoverable 72h) —
+      // nothing cascaded.
+      for (const slug of realSlugs) {
+        expect(await eng.getPage(slug)).toBeNull();
+        const peek = await eng.getPage(slug, { includeDeleted: true, sourceId: 'default' });
+        expect(peek).not.toBeNull();
+        expect(peek!.deleted_at).not.toBeNull();
+      }
+      // Empty input short-circuits identically (F1).
+      expect(await eng.softDeletePages([], { sourceId: 'default' })).toEqual([]);
+    }
+  });
+
+  test('#4587 revival parity: delete -> re-add within 72h clears deleted_at, updates content, replaces chunks/links (not duplicated)', async () => {
+    const slug = 'wiki/revive-cycle';
+    const peer = 'wiki/revive-peer';
+    for (const eng of [pgEngine, pgliteEngine]) {
+      await eng.putPage(peer, { type: 'note', title: peer, compiled_truth: 'peer', timeline: '' });
+      await eng.putPage(slug, { type: 'note', title: 'V1', compiled_truth: 'body v1', timeline: '' });
+      await eng.upsertChunks(slug, [
+        { chunk_index: 0, chunk_text: 'v1 chunk a', chunk_source: 'compiled_truth' },
+        { chunk_index: 1, chunk_text: 'v1 chunk b', chunk_source: 'compiled_truth' },
+      ]);
+      await eng.addLink(slug, peer, 'ctx', 'wikilink');
+
+      // Sync-style removal: the removed-file drain soft-deletes.
+      expect(await eng.softDeletePages([slug], { sourceId: 'default' })).toEqual([slug]);
+      expect(await eng.getPage(slug)).toBeNull();
+
+      // Re-add within the window: the import pipeline's upsert revives the
+      // SAME row (deleted_at clears, content updates), then chunk/link
+      // rewrite REPLACES the old sets rather than stacking duplicates.
+      const revived = await eng.putPage(slug, { type: 'note', title: 'V2', compiled_truth: 'body v2', timeline: '' });
+      expect(revived.slug).toBe(slug);
+      const page = await eng.getPage(slug, { sourceId: 'default' });
+      expect(page).not.toBeNull();
+      expect(page!.title).toBe('V2');
+      expect(page!.compiled_truth).toBe('body v2');
+      expect(page!.deleted_at ?? null).toBeNull();
+
+      await eng.upsertChunks(slug, [
+        { chunk_index: 0, chunk_text: 'v2 chunk only', chunk_source: 'compiled_truth' },
+      ]);
+      await eng.addLink(slug, peer, 'ctx v2', 'wikilink');
+
+      const chunks = await eng.getChunks(slug);
+      expect(chunks).toHaveLength(1);
+      expect(chunks[0].chunk_text).toBe('v2 chunk only');
+      const links = await eng.getLinks(slug);
+      expect(links).toHaveLength(1);
+    }
+  });
+
   test('#2555 getChunks sourceIds[] parity: federated grant + scalar floor + unset default identical on both engines', async () => {
     for (const eng of [pgEngine, pgliteEngine]) {
       await eng.executeRaw(`INSERT INTO sources (id, name, local_path) VALUES ('gcp-beta', 'gcp-beta', '/tmp/gcp-beta') ON CONFLICT (id) DO NOTHING`);

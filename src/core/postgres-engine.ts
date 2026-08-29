@@ -879,6 +879,29 @@ export class PostgresEngine implements BrainEngine {
     return { slug: rows[0].slug as string };
   }
 
+  /**
+   * #4587 — batch soft-delete primitive. See BrainEngine.softDeletePages
+   * JSDoc. Mirrors deletePages' shape (empty-array early-return, batch-size
+   * throw, RETURNING slug) with softDeletePage's `deleted_at IS NULL`
+   * idempotency predicate. Nothing cascades — the 72h purge phase owns the
+   * eventual hard delete.
+   */
+  async softDeletePages(slugs: string[], opts: { sourceId: string }): Promise<string[]> {
+    if (slugs.length === 0) return [];
+    if (slugs.length > DELETE_BATCH_SIZE) {
+      throw new Error(
+        `softDeletePages: input size ${slugs.length} exceeds DELETE_BATCH_SIZE=${DELETE_BATCH_SIZE}. Caller must chunk.`,
+      );
+    }
+    const sql = this.sql;
+    const rows = await sql<{ slug: string }[]>`
+      UPDATE pages SET deleted_at = now()
+       WHERE slug = ANY(${slugs}::text[]) AND source_id = ${opts.sourceId} AND deleted_at IS NULL
+      RETURNING slug
+    `;
+    return rows.map(r => r.slug);
+  }
+
   async restorePage(slug: string, opts?: { sourceId?: string }): Promise<boolean> {
     const sql = this.sql;
     const sourceId = opts?.sourceId;
