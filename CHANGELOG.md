@@ -2,6 +2,91 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.47.6.0] - 2026-08-29
+
+**The community fix wave: takes work on Postgres again, sync deletions get a
+72-hour safety net, embed backfills can't hang silently anymore, and sixteen
+contributor fixes land with full credit.**
+
+### Fixed
+
+- **Takes are fully usable on Postgres again.** `takes embed` no longer
+  rejects every take and `takes propose --json` no longer crashes — both were
+  broken by the database returning 64-bit ids in a shape the code didn't
+  expect. `takes list` also gained the `--limit`/`--offset` flags its help
+  already implied. (adopted from community PRs, with thanks)
+- **Reasoning models that think out loud no longer break extraction.** Models
+  that emit a `<think>` block before their answer (DeepSeek-R1 and similar)
+  previously broke every JSON extractor; the parser now strips the reasoning
+  block only when a raw parse fails, so nothing else changes.
+- **Dream subagents fail fast on oversized prompts** on both dispatch paths
+  instead of burning retries against an error that can never succeed.
+- **MCP clients now receive the operating contract.** All three server
+  transports return `instructions` on initialize, and `put_page`'s
+  description states plainly that it REPLACES the whole page — read before
+  you write. **Say to your agent:** *"read the brain's operating contract"* —
+  it arrives automatically on connect now.
+- **Your pricing overrides reach every capped backfill.** `pricing.overrides`
+  (now a registered config key) applies to embedding backfills and
+  conversation-facts runs; an unpriced model under the implicit default cap
+  runs uncapped with a warning, while an explicit cap fails closed.
+  gpt-5.6-luna's price was updated to the current published rate (verified
+  against the provider's official pricing page).
+- **Embed backfills can't wedge silently.** Oversized chunks that predate the
+  input cap are split in place instead of failing every sweep; the
+  single-flight lock heartbeat bounds each refresh so one hung call can't
+  silence it (hardening, refs #4599); and a progress-keyed stall watchdog
+  (`GBRAIN_EMBED_STALL_ABORT_SECONDS`, default 900) aborts a dead drain,
+  releases its locks, and leaves a resumable run instead of an infinite hang.
+- **Sync file removals are recoverable for 72 hours.** Deleting a file from a
+  synced repo now soft-deletes its page (hidden everywhere you look, revived
+  automatically if the file comes back, hard-deleted by the purge phase) —
+  the same safety net `delete_page` already had. Batch failures decompose
+  per-file and the run continues.
+- **A persisted sync exclude scope is honored on every path** — including the
+  very first sync and internal callers (autopilot, cycle jobs), closing a
+  duplicate-import loop. **Say to your agent:** *"exclude the generated/
+  folder from my brain's sync"* — your agent runs
+  `gbrain config set sync.exclude '["generated/**"]'`.
+- **put_page validates slugs at the boundary** (spaces, traversal shapes, and
+  control characters are rejected loudly) while still accepting everything
+  the sync importer legitimately produces (`notes/v1.0.0`,
+  `people/my_file_name`, CJK slugs).
+- **Stats, health, and identity honor source-scoped remote grants.** A remote
+  caller's counters now confine to its granted sources, the same way reads
+  do. Trusted local calls keep the brain-wide view.
+- **Codex CLI 0.149.x compatibility for the bootstrap harness.** The MCP
+  registration now uses the `http_headers` auth shape (older codex-cli
+  versions accept it too); token recovery still reads legacy wiring.
+- **Backlink repair no longer forges dates.** Repaired references land as
+  undated entries in a "Referenced by" section instead of timeline events
+  stamped with the repair run's date.
+- **Dead-reranker latency removed ahead of the provider sunset.** The default
+  hosted reranker's provider shuts down on 2026-09-04; past that date the
+  search path skips the dead call entirely (no more multi-second timeout per
+  query), fails open loudly (audit trail + one stderr notice), and
+  `gbrain doctor` explains the state. **Reranking stops after 2026-09-04
+  unless you migrate** — **say to your agent:** *"migrate my embeddings and
+  reranker off the sunset provider"* — your agent runs
+  `gbrain migrate embeddings` and confirms with `gbrain doctor`.
+
+### Changed
+
+- The schema-bootstrap diagnostic line names what it found (a forward-
+  reference gap) instead of mislabeling newer brains as "pre-v0.21".
+
+## To take advantage of v0.47.6.0
+
+`gbrain upgrade` is all you need — no schema migrations, no manual steps.
+If you rerank through the sunsetting provider, plan the migration above
+before 2026-09-04.
+
+1. **Verify the upgrade:**
+   ```bash
+   gbrain --version
+   gbrain doctor
+   ```
+
 ## [0.47.5.0] - 2026-08-29
 
 **Postgres brains created before v0.46.35.0 upgrade cleanly again — the
