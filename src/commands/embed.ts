@@ -61,6 +61,7 @@ export type { EmbedBatchWithBackoffOpts } from '../core/embed-retry.ts';
 
 /** #3037: cap failure samples so a corpus-wide outage doesn't bloat --json. */
 const FAILURE_SAMPLE_CAP = 10;
+const DEFAULT_EMBED_LOCK_HEARTBEAT_TIMEOUT_MS = 30_000;
 
 /**
  * #3037: record embed failures on the run result. `chunkCount` is the number
@@ -489,10 +490,25 @@ export async function runEmbedCore(engine: BrainEngine, opts: EmbedOpts): Promis
     const activeLocks: DbLockHandle[] = callerHeld ? [...(opts.heldLocks ?? [])] : sfLocks;
     const lockAbort = new AbortController();
     let heartbeat: ReturnType<typeof setInterval> | undefined;
+    let heartbeatTickAbort: AbortController | undefined;
+    let stoppingHeartbeat = false;
+    const stopHeartbeat = (): void => {
+      stoppingHeartbeat = true;
+      if (heartbeat !== undefined) {
+        clearInterval(heartbeat);
+        heartbeat = undefined;
+      }
+      if (heartbeatTickAbort && !heartbeatTickAbort.signal.aborted) {
+        heartbeatTickAbort.abort();
+      }
+    };
     // Test seam: default 5 min; tests shrink it to exercise the loss path.
     const heartbeatMs = Number(process.env.GBRAIN_EMBED_LOCK_HEARTBEAT_MS) > 0
       ? Number(process.env.GBRAIN_EMBED_LOCK_HEARTBEAT_MS)
       : 5 * 60 * 1000;
+    const heartbeatTimeoutMs = Number(process.env.GBRAIN_EMBED_LOCK_HEARTBEAT_TIMEOUT_MS) > 0
+      ? Number(process.env.GBRAIN_EMBED_LOCK_HEARTBEAT_TIMEOUT_MS)
+      : DEFAULT_EMBED_LOCK_HEARTBEAT_TIMEOUT_MS;
     if (activeLocks.length > 0 && !opts.dryRun) {
       let consecutiveErrors = 0;
       let beating = false;
@@ -500,32 +516,51 @@ export async function runEmbedCore(engine: BrainEngine, opts: EmbedOpts): Promis
         if (beating) return; // a slow tick must not stack
         beating = true;
         void (async () => {
+          const tickAbort = new AbortController();
+          heartbeatTickAbort = tickAbort;
+          let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
+          const timeout = new Promise<never>((_, reject) => {
+            timeoutTimer = setTimeout(() => {
+              tickAbort.abort();
+              reject(new Error('refresh_timeout'));
+            }, heartbeatTimeoutMs);
+            (timeoutTimer as unknown as { unref?: () => void }).unref?.();
+          });
           try {
             if (lockAbort.signal.aborted) return;
             for (const h of activeLocks) {
-              const ok = await h.refresh();
+              const ok = await Promise.race([h.refresh({ signal: tickAbort.signal }), timeout]);
               if (!ok) {
                 result.lock_lost = true;
                 serr('  [embed] single-flight lock was stolen or released mid-run; aborting the drain (partial progress is banked — re-run to resume).');
-                if (heartbeat !== undefined) clearInterval(heartbeat);
+                stopHeartbeat();
                 lockAbort.abort();
                 return;
               }
             }
             consecutiveErrors = 0;
           } catch {
+            if (stoppingHeartbeat) return;
             consecutiveErrors += 1;
             if (consecutiveErrors >= 3) {
               result.lock_lost = true;
               serr('  [embed] lock heartbeat failed 3 consecutive times; aborting the drain rather than running without mutual exclusion.');
-              if (heartbeat !== undefined) clearInterval(heartbeat);
+              stopHeartbeat();
               lockAbort.abort();
             }
           } finally {
+            if (timeoutTimer !== undefined) clearTimeout(timeoutTimer);
+            if (heartbeatTickAbort === tickAbort) heartbeatTickAbort = undefined;
             beating = false;
           }
         })();
       }, heartbeatMs);
+      // Deliberately NOT unref'd: if the drain promise is lost (#4599 class),
+      // the referenced interval keeps the process alive as a LOUD hang instead
+      // of a silent exit-0 that leaks the single-flight locks. The per-tick
+      // timeout timer above IS unref'd — the interval already anchors the
+      // event loop, so the 30s tick timeout must not extend process lifetime
+      // past stopHeartbeat().
     }
     const drainSignal = anySignal(lockAbort.signal, opts.signal);
 
@@ -578,7 +613,7 @@ export async function runEmbedCore(engine: BrainEngine, opts: EmbedOpts): Promis
       // already set + explained on stderr) — not an error to propagate.
       if (!(result.lock_lost && e instanceof AbortError)) throw e;
     } finally {
-      if (heartbeat !== undefined) clearInterval(heartbeat);
+      stopHeartbeat();
       // E1: surface pacing telemetry (human + structured) when pacing was on.
       const snap = pacer.snapshot();
       if (snap.enabled) {
