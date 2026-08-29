@@ -8,7 +8,7 @@ import { healOversizedPageChunks, healedChunksToStaleRows } from '../core/embed-
 import {
   createEmbedStallWatchdog,
   resolveEmbedStallAbortSeconds,
-  EMBED_STALL_CLEANUP_DEADLINE_MS,
+  EMBED_STALL_CLEANUP_DEADLINE_MS, type EmbedStallInfo,
 } from '../core/embed-stall.ts';
 import { createProgress, type ProgressReporter } from '../core/progress.ts';
 import { getCliOptions, cliOptsToProgressOptions } from '../core/cli-options.ts';
@@ -707,7 +707,7 @@ export async function runEmbedCore(engine: BrainEngine, opts: EmbedOpts): Promis
       return result;
     }
     let outcome: 'drained' | 'stalled';
-    let stallInfo: import('../core/embed-stall.ts').EmbedStallInfo | undefined;
+    let stallInfo: EmbedStallInfo | undefined;
     try {
       outcome = await Promise.race([
         drain.then(() => 'drained' as const),

@@ -227,14 +227,13 @@ async function runLoopConvertingLeaseLoss<T>(
     // other transient failure up to max_stalled instead of fast-failing —
     // the exact dream-cycle queue-clog class the legacy-path fix was built
     // to prevent, just on the newer path.
-    if (isPromptTooLongError(e)) {
-      // Prefer the matched detail text (e.g. "prompt is too long: 1707509
-      // tokens > 1000000 maximum") over `e.message`, which post-normalizeAIError
-      // is only the generic outer wrapper text (e.g. "BadRequestError") — the
-      // actually-useful token-count detail lives on `.cause`, same as the match.
-      const detail = extractPromptTooLongDetail(e) ?? (e instanceof Error ? e.message : String(e));
-      throw new UnrecoverableError(`prompt_too_long: ${detail}`);
-    }
+    // Single walk: extractPromptTooLongDetail is non-null exactly when
+    // isPromptTooLongError matches (both wrap the same matcher). The detail is
+    // the matched provider text ("prompt is too long: N tokens > max"), not
+    // `e.message` — post-normalizeAIError that is only the generic outer
+    // wrapper; the useful token counts live on `.cause`, same as the match.
+    const detail = extractPromptTooLongDetail(e);
+    if (detail !== null) throw new UnrecoverableError(`prompt_too_long: ${detail}`);
     throw e;
   }
 }

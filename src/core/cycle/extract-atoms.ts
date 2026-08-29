@@ -450,17 +450,36 @@ export async function atomsExistingForHashes(
 
 /**
  * The exact two-step model resolution `runPhaseExtractAtoms` uses:
- * `models.dream.extract_atoms` DB config wins if set, else the key-aware
- * `resolveTierDefault('utility')`. Deliberately NOT `resolveModel()`'s
- * fuller chain (which also honors `models.tier.utility`, `models.default`,
- * and an env var) — extract_atoms has never read those, and unifying the
- * two behaviors is a separate, larger change. Exported so `gbrain models`
- * can report the actual routing instead of a generic chain that can diverge
- * from it in partially-configured installs.
+ * `models.dream.extract_atoms` DB config wins if set (same plain-`||`
+ * truthiness as always — a whitespace-only value IS "configured"), else the
+ * key-aware `resolveTierDefault('utility')`. Deliberately NOT
+ * `resolveModel()`'s fuller chain (which also honors `models.tier.utility`,
+ * `models.default`, and an env var) — extract_atoms has never read those, and
+ * unifying the two behaviors is a separate, larger change. Exported so
+ * `gbrain models` can report the actual routing instead of a generic chain
+ * that can diverge from it in partially-configured installs; `source` comes
+ * from the SAME call as `model` so the report's attribution can never
+ * disagree with the resolved value. Fail-soft: a throwing config read routes
+ * to the tier default (the same end state runPhaseExtractAtoms's config-read
+ * try/catch has always produced).
  */
+export async function resolveExtractAtomsModelWithSource(
+  engine: BrainEngine,
+): Promise<{ model: string; source: 'config' | 'tier_default' }> {
+  let configuredModel: string | null = null;
+  try {
+    configuredModel = await engine.getConfig('models.dream.extract_atoms');
+  } catch {
+    // Fail-soft — fall through to the tier default.
+  }
+  return configuredModel
+    ? { model: configuredModel, source: 'config' }
+    : { model: resolveTierDefault('utility'), source: 'tier_default' };
+}
+
+/** String-returning wrapper for runtime callers (`runPhaseExtractAtoms`). */
 export async function resolveExtractAtomsModel(engine: BrainEngine): Promise<string> {
-  const configuredModel = await engine.getConfig('models.dream.extract_atoms');
-  return configuredModel || resolveTierDefault('utility');
+  return (await resolveExtractAtomsModelWithSource(engine)).model;
 }
 
 /**

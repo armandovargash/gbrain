@@ -35,7 +35,7 @@ import {
   resolveAlias,
   type ModelTier,
 } from '../core/model-config.ts';
-import { resolveExtractAtomsModel } from '../core/cycle/extract-atoms.ts';
+import { resolveExtractAtomsModelWithSource } from '../core/cycle/extract-atoms.ts';
 import { maybeAttachVersionSuffixHint } from '../core/ai/base-url-probe.ts';
 import type { AIGatewayConfig } from '../core/ai/types.ts';
 
@@ -59,11 +59,13 @@ interface PerTaskModelRoute {
    * `key`'s own DB config, then a tier-default fallback. Reporting via the
    * generic chain here would show a resolved value that can diverge from
    * what the caller actually uses in partially-configured installs, so this
-   * calls the caller's own resolver instead. Reported `source` is either
+   * calls the caller's own resolver instead. The resolver returns model AND
+   * attribution from the same call so the reported `source` — rendered as
    * `config: <key>` or `tier.<tier> (caller-specific)` to make the narrower
-   * chain visible rather than implying full resolveModel() coverage.
+   * chain visible rather than implying full resolveModel() coverage — can
+   * never disagree with the resolved value.
    */
-  narrowResolver?: (engine: BrainEngine) => Promise<string>;
+  narrowResolver?: (engine: BrainEngine) => Promise<{ model: string; source: 'config' | 'tier_default' }>;
 }
 
 const PER_TASK_KEYS: PerTaskModelRoute[] = [
@@ -80,7 +82,7 @@ const PER_TASK_KEYS: PerTaskModelRoute[] = [
     key: 'models.dream.extract_atoms',
     tier: 'utility',
     description: 'Atom extraction from transcripts/pages (extract_atoms phase)',
-    narrowResolver: resolveExtractAtomsModel,
+    narrowResolver: resolveExtractAtomsModelWithSource,
   },
   { key: 'models.drift',                    tier: 'reasoning', description: 'Drift LLM judge (v0.29 scaffold)' },
   { key: 'models.auto_think',               tier: 'deep',      description: 'Auto-think question answering' },
@@ -164,13 +166,11 @@ async function buildReport(engine: BrainEngine): Promise<ModelsReport> {
     // / models.default / env var) reports via that exact resolver, not the
     // generic resolveModel() chain — see PerTaskModelRoute.narrowResolver.
     if (narrowResolver) {
-      // Same truthiness check the resolver itself uses (plain `||`, no
-      // `.trim()`) so `source` can't disagree with what `resolved` actually
-      // reflects — e.g. a whitespace-only config value IS "configured" to
-      // the resolver and must be reported as such, not as the tier default.
-      const configuredValue = await engine.getConfig(key);
-      const resolved = await narrowResolver(engine);
-      const source = configuredValue ? `config: ${key}` : `tier.${tier} (caller-specific)`;
+      // ONE resolver call feeds both the resolved model and the attribution,
+      // so the label can never disagree with what `resolved` actually
+      // reflects (previously a separate getConfig truthiness re-check).
+      const { model: resolved, source: narrowSource } = await narrowResolver(engine);
+      const source = narrowSource === 'config' ? `config: ${key}` : `tier.${tier} (caller-specific)`;
       per_task.push({ key, tier, resolved, source, description });
       continue;
     }

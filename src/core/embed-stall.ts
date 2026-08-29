@@ -44,6 +44,8 @@
  * `stop()` clears it on every normal path.
  */
 
+import { resolveStallAbortSecondsFromEnv } from './stall-env.ts';
+
 /** Default no-successful-progress window (seconds). Same default as sync's #1950 watchdog. */
 export const DEFAULT_EMBED_STALL_ABORT_SEC = 900;
 
@@ -58,11 +60,9 @@ export const EMBED_STALL_CLEANUP_DEADLINE_MS = 10_000;
 export function resolveEmbedStallAbortSeconds(
   env: Record<string, string | undefined> = process.env,
 ): number {
-  const raw = env.GBRAIN_EMBED_STALL_ABORT_SECONDS;
-  if (raw === undefined || raw === '') return DEFAULT_EMBED_STALL_ABORT_SEC;
-  const n = Number(raw);
-  if (!Number.isFinite(n)) return DEFAULT_EMBED_STALL_ABORT_SEC;
-  return n; // n <= 0 disables
+  return resolveStallAbortSecondsFromEnv(
+    'GBRAIN_EMBED_STALL_ABORT_SECONDS', DEFAULT_EMBED_STALL_ABORT_SEC, env,
+  );
 }
 
 // ---------------------------------------------------------------------------

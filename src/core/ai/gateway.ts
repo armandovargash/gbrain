@@ -117,7 +117,7 @@ import {
   NEW_INSTALL_DEFAULT_EMBEDDING_MODEL,
   LEGACY_DEFAULT_RERANKER_MODEL,
   renderCanonicalMigrationCommands,
-  rerankerSunset,
+  rerankerSunset, sunsetDateHasPassed,
   type RerankerSunset,
 } from './defaults.ts';
 import { logRerankFailure } from '../rerank-audit.ts';
@@ -1593,10 +1593,9 @@ export function __setSunsetClockForTests(fn: (() => Date) | null): void {
   _sunsetClock = fn;
 }
 function sunsetHasPassed(sunset: RerankerSunset): boolean {
-  const now = _sunsetClock ? _sunsetClock() : new Date();
-  // Same semantics as doctor's provider_sunset check: the API "shuts down ON
-  // this date", so the date itself already counts as past.
-  return now.getTime() >= Date.parse(`${sunset.date}T00:00:00Z`);
+  // Shared date-itself-counts comparison with doctor's provider_sunset check
+  // (defaults.ts:sunsetDateHasPassed) so the two surfaces cannot drift.
+  return sunsetDateHasPassed(sunset.date, _sunsetClock ? _sunsetClock() : undefined);
 }
 function sunsetShortCircuitOnce(
   modelStr: string,

@@ -46,7 +46,7 @@ import { acquireLease, releaseLease, RateLeaseUnavailableError } from '../rate-l
 import { isRetryableConnError } from '../../retry-matcher.ts';
 import { logSubagentHeartbeat } from './subagent-audit.ts';
 import { UnrecoverableError } from '../types.ts';
-import { isPromptTooLongError, extractPromptTooLongDetail } from './subagent.ts';
+import { extractPromptTooLongDetail } from './subagent.ts';
 import {
   persistMessage,
   persistToolExecComplete,
@@ -365,8 +365,10 @@ export async function runSubagentOneshot(args: OneshotArgs): Promise<OneshotOutc
     // any other transient failure up to max_stalled, recreating the same
     // dream-cycle queue-clog class the legacy and gateway-loop paths already
     // fast-fail on.
-    if (isPromptTooLongError(err)) {
-      const detail = extractPromptTooLongDetail(err) ?? (err instanceof Error ? err.message : String(err));
+    // Single walk: extractPromptTooLongDetail is non-null exactly when
+    // isPromptTooLongError matches (both wrap the same matcher).
+    const detail = extractPromptTooLongDetail(err);
+    if (detail !== null) {
       throw new UnrecoverableError(`prompt_too_long: ${detail}`);
     }
     // Job-level abort or transport error: the job machinery owns these — a

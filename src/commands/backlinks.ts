@@ -233,6 +233,11 @@ export function insertBacklinkEntry(content: string, bodyStart: number, entry: s
   return suffix ? section + eol + suffix : section;
 }
 
+/**
+ * @deprecated Compat alias whose name predates the undated 'Referenced by'
+ * behavior (entries are no longer dated timeline lines). Kept for downstream
+ * imports; new code uses insertBacklinkEntry.
+ */
 export const insertTimelineEntry = insertBacklinkEntry;
 
 /**

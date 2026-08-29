@@ -8,6 +8,7 @@ import type { FactsBackstopResult } from '../core/facts/backstop.ts';
 // Leaf module (no flag surface of its own) — see that file for why this
 // isn't imported from extract-conversation-facts.ts directly (#4135).
 import { ALLOWED_TYPES, type AllowedType } from '../core/facts/conversation-types.ts';
+import { assertEmbedNotStalled } from '../core/embed-stall.ts';
 import { assertEmbedBackfillQueueAdmission } from '../core/minions/embed-backfill-admission.ts';
 import { isProtectedJobName } from '../core/minions/protected-names.ts';
 import { MinionQueue, deriveWedgeSignal } from '../core/minions/queue.ts';
@@ -2250,7 +2251,6 @@ export async function registerBuiltinHandlers(
     });
     // #4599 (X6): a stall-watchdog abort is an error RESULT from core; the
     // handler layer converts it to a FAILED JOB (throw) — never process.exit.
-    const { assertEmbedNotStalled } = await import('../core/embed-stall.ts');
     assertEmbedNotStalled(embedResult);
     // Report what happened, not a constant. `embedded: true` claimed a dry run
     // had embedded, which is the same lie in miniature: `gbrain jobs get`
@@ -3041,7 +3041,6 @@ export async function registerBuiltinHandlers(
       includeNullSignature: !!data.includeNullSignature,
     });
     // #4599 (X6): stall abort → failed job (throw), same as the embed handler.
-    const { assertEmbedNotStalled } = await import('../core/embed-stall.ts');
     assertEmbedNotStalled(catchUpResult);
     return catchUpResult;
   });
