@@ -44,6 +44,7 @@ import {
 } from '../../budget/budget-tracker.ts';
 import { getEmbeddingModel, withBudgetTracker } from '../../ai/gateway.ts';
 import { embedStaleForSource } from '../../embed-stale.ts';
+import { createEmbedStallWatchdog, resolveEmbedStallAbortSeconds } from '../../embed-stall.ts';
 import { currentEmbeddingSignature } from '../../embedding.ts';
 import { type DbPacer, createDbPacer, createNoopPacer } from '../../db-pacer.ts';
 import { resolvePaceMode, loadPaceModeConfig, readPaceEnv } from '../../pace-mode.ts';
@@ -128,6 +129,13 @@ async function resolveBackfillPacer(
 interface BackfillBudgetCap {
   maxCostUsd: number | undefined;
   defaulted: boolean;
+  /**
+   * The config key was PRESENT but unparsable ("ten", "garbage"). The
+   * operator intended a cap, so the $10 default applies AND is never
+   * droppable for unpriced models — degrading a typo'd cap to uncapped
+   * would silently defeat explicit intent (adversarial review of #4571).
+   */
+  misconfigured: boolean;
 }
 
 function isExplicitFiniteUsdLimit(raw: unknown): boolean {
@@ -139,12 +147,16 @@ function isExplicitFiniteUsdLimit(raw: unknown): boolean {
 
 async function readMaxUsd(engine: BrainEngine): Promise<BackfillBudgetCap> {
   const posture = await resolveSpendPosture(engine);
-  if (posture === 'tokenmax') return { maxCostUsd: undefined, defaulted: false };
+  if (posture === 'tokenmax') return { maxCostUsd: undefined, defaulted: false, misconfigured: false };
   const raw = await engine.getConfig('embed.backfill_max_usd');
   const parsed = parseUsdLimit(raw, DEFAULT_MAX_USD_PER_JOB);
+  const explicit = isExplicitFiniteUsdLimit(raw);
+  const present = !(raw === null || raw === undefined || (typeof raw === 'string' && raw.trim() === ''));
+  const isOff = typeof raw === 'string' && raw.trim().toLowerCase() === 'off';
   return {
     maxCostUsd: usdLimitToCap(parsed),
-    defaulted: parsed === DEFAULT_MAX_USD_PER_JOB && !isExplicitFiniteUsdLimit(raw),
+    defaulted: parsed === DEFAULT_MAX_USD_PER_JOB && !explicit,
+    misconfigured: present && !explicit && !isOff,
   };
 }
 
@@ -162,6 +174,16 @@ function capForModel(
   pricingOverrides: PricingOverrides | undefined,
 ): number | undefined {
   if (cap.maxCostUsd === undefined) return undefined;
+  if (cap.misconfigured) {
+    // Present-but-garbage value: the operator INTENDED a cap. Keep the $10
+    // default and never drop it — a typo must not degrade to uncapped spend.
+    console.error(
+      `[embed-backfill] embed.backfill_max_usd is set but not a positive ` +
+        `number; keeping the $${DEFAULT_MAX_USD_PER_JOB} default cap (fail-closed). ` +
+        `Fix the value or set it to 'off' to remove the ceiling.`,
+    );
+    return cap.maxCostUsd;
+  }
   if (cap.defaulted && modelId && !isModelPriceable(modelId, 'embed', pricingOverrides)) {
     console.error(
       `[embed-backfill] model "${modelId}" is not in the pricing maps; ` +
@@ -233,11 +255,32 @@ export function makeEmbedBackfillHandler(
     // the supervisor, so pacing it is the headline win.
     const { pacer, concurrency } = await resolveBackfillPacer(engine, job.data);
 
+    // #4599: this handler is the auto-queued production backfill — the lane
+    // most likely to hit the wedged-drain shape (pool exhaustion) — and it
+    // bypasses runEmbedCore's watchdog. Arm one here: progress = banked
+    // cursor movement (embedded + chunksProcessed); on stall, abort the
+    // drain through the same signal the operator abort uses, then THROW so
+    // the queue marks the job failed and the resumable cursor re-runs it.
+    const stallSeconds = resolveEmbedStallAbortSeconds();
+    const drainAbort = new AbortController();
+    const onJobAbort = () => drainAbort.abort();
+    if (job.signal?.aborted) drainAbort.abort();
+    job.signal?.addEventListener('abort', onJobAbort, { once: true });
+    let progressCounter = 0;
+    const watchdog = stallSeconds > 0
+      ? createEmbedStallWatchdog({ thresholdSeconds: stallSeconds, readProgress: () => progressCounter })
+      : undefined;
+    let stalled = false;
+    void watchdog?.stalled.then(() => {
+      stalled = true;
+      drainAbort.abort();
+    });
+
     try {
       const result = await withBudgetTracker(tracker, async () =>
         runStale(engine, sourceId, {
           batchSize,
-          signal: job.signal,
+          signal: drainAbort.signal,
           pacer,
           ...(concurrency !== undefined && { concurrency }),
           // v0.41.31: re-embed pages whose model signature drifted + stamp
@@ -246,6 +289,8 @@ export function makeEmbedBackfillHandler(
           // staleness instead of stamping a wrong signature.
           ...(currentEmbeddingSignature() !== null && { embeddingSignature: currentEmbeddingSignature()! }),
           onProgress: ({ embedded, chunksProcessed, cursor }) => {
+            // Banked forward progress feeds the stall watchdog's clock.
+            progressCounter = embedded + chunksProcessed;
             // Fire-and-forget; updateProgress returns a Promise but the
             // handler is sync inside the loop.
             void job.updateProgress({
@@ -258,6 +303,15 @@ export function makeEmbedBackfillHandler(
         }),
       );
 
+      if (stalled) {
+        // Watchdog abort, not an operator abort: fail the job so the queue's
+        // retry/dead-letter machinery sees it; the cursor is banked, so the
+        // next run resumes. Mirrors assertEmbedNotStalled's contract.
+        throw new Error(
+          `stall_timeout: no banked backfill progress for ${stallSeconds}s ` +
+            `(embedded=${result.embedded}, chunksProcessed=${result.chunksProcessed}); aborted and resumable`,
+        );
+      }
       if (result.aborted) {
         return {
           status: 'aborted',
@@ -310,6 +364,8 @@ export function makeEmbedBackfillHandler(
       }
       throw err;
     } finally {
+      watchdog?.stop();
+      job.signal?.removeEventListener('abort', onJobAbort);
       pacer.dispose();
       // Settle this run's LLM/embedding spend against the originating OAuth
       // client (job.data.client_id when run_onboard submitted the job; NULL

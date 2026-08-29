@@ -229,7 +229,9 @@ describe('healOversizedPageChunks (load → split → upsert → reload orchestr
       getChunks: async (_slug: string, opts?: unknown) => {
         getCalls++;
         getOptsSeen.push(opts);
-        return getCalls === 1 ? initial : reloaded;
+        // Read 1 = snapshot, read 2 = the freshness-guard recheck (must match
+        // the snapshot or the heal skips), read 3 = the post-upsert reload.
+        return getCalls <= 2 ? initial : reloaded;
       },
       upsertChunks: async (_slug: string, chunks: Array<{ chunk_text: string }>, opts?: unknown) => {
         upserted = chunks;
@@ -256,8 +258,38 @@ describe('healOversizedPageChunks (load → split → upsert → reload orchestr
     for (const c of upserted!) {
       expect(estimateEmbedTokens(c.chunk_text)).toBeLessThanOrEqual(MXBAI_CAP);
     }
-    // Both reads and the write stay scoped to the caller's source.
-    expect(getOptsSeen).toEqual([{ sourceId: 'src-a' }, { sourceId: 'src-a' }]);
+    // All three reads (snapshot, freshness recheck, reload) and the write
+    // stay scoped to the caller's source.
+    expect(getOptsSeen).toEqual([{ sourceId: 'src-a' }, { sourceId: 'src-a' }, { sourceId: 'src-a' }]);
     expect(upsertOpts).toEqual({ sourceId: 'src-a' });
+  });
+
+  test('freshness guard: a concurrent rewrite between snapshot and write skips the heal (no clobber)', async () => {
+    const oversized = fatParagraph(40);
+    const initial = [chunkRow({ chunk_index: 0, chunk_text: oversized, token_count: 5000 })];
+    // Simulate a sync import rewriting the page mid-heal: the recheck sees a
+    // different chunk set. Upserting the stale splits would silently desync
+    // chunk_text from the page content — the guard must skip instead.
+    const rewritten = [chunkRow({ chunk_index: 0, chunk_text: 'fresh synced content' })];
+    let getCalls = 0;
+    let upsertCalled = false;
+    const engine = {
+      getChunks: async () => (++getCalls === 1 ? initial : rewritten),
+      upsertChunks: async () => {
+        upsertCalled = true;
+      },
+    };
+
+    const onSplitCalls: number[] = [];
+    const res = await healOversizedPageChunks(engine as never, 'notes/racing', {
+      maxTokens: MXBAI_CAP,
+      onSplit: (n) => onSplitCalls.push(n),
+    });
+
+    expect(upsertCalled).toBe(false);
+    expect(onSplitCalls).toEqual([]);
+    expect(res.changed).toBe(false);
+    // The caller gets the FRESH rows, so the drain proceeds on current truth.
+    expect(res.chunks).toBe(rewritten);
   });
 });

@@ -378,9 +378,61 @@ describe('embed-backfill handler — #4571 unpriced embedding models', () => {
   // $10 default AND the value is classified as IMPLICIT (defaulted), so with
   // an unpriced model the cap is dropped-with-warning rather than failing
   // closed the way an explicit numeric cap does.
-  test("garbage explicit cap ('garbage') classifies as implicit: unpriced model runs uncapped", async () => {
+  test("garbage cap value ('garbage') keeps the $10 default and stays FAIL-CLOSED for unpriced models", async () => {
+    // Adversarial review of #4571: a present-but-unparsable value means the
+    // operator INTENDED a cap — a typo must not silently degrade to uncapped
+    // spend (typo × unpriced model × auto-requeue = unbounded paid API).
     configureUnpricedEmbeddingModel();
     await engine.setConfig('embed.backfill_max_usd', 'garbage');
+    let drainRanToCompletion = false;
+    const handler = makeEmbedBackfillHandler(engine, {
+      runStale: async () => {
+        const tracker = getCurrentBudgetTracker();
+        if (!tracker) throw new Error('missing BudgetTracker scope');
+        tracker.reserve({
+          modelId: 'openai:bge-m3',
+          estimatedInputTokens: 1_000_000,
+          maxOutputTokens: 0,
+          kind: 'embed',
+        });
+        tracker.record({ modelId: 'openai:bge-m3', inputTokens: 1_000_000, kind: 'embed' });
+        drainRanToCompletion = true;
+        return { ...drainBase, embedded: 1, chunksProcessed: 1 };
+      },
+    });
+
+    const result = await handler(fakeJob({ sourceId: 'default' }));
+    expect(result.status).toBe('budget_exhausted');
+    expect(result.budgetCapUsd).toBe(10);
+    expect(drainRanToCompletion).toBe(false);
+  });
+
+  test('stall watchdog covers the backfill lane: a wedged drain aborts and fails the job (refs #4599)', async () => {
+    // The auto-queued production backfill was the lane most likely to hit
+    // the wedged-drain shape and previously had NO watchdog (it bypasses
+    // runEmbedCore). Wedge the drain: it honors the abort signal (as the
+    // real embedStaleForSource does) but otherwise never settles.
+    const prevStall = process.env.GBRAIN_EMBED_STALL_ABORT_SECONDS;
+    process.env.GBRAIN_EMBED_STALL_ABORT_SECONDS = '1';
+    try {
+      const handler = makeEmbedBackfillHandler(engine, {
+        runStale: async (_e, _s, opts) =>
+          await new Promise((resolve) => {
+            opts?.signal?.addEventListener('abort', () =>
+              resolve({ ...drainBase, aborted: true, embedded: 0, chunksProcessed: 0 }),
+            );
+          }),
+      });
+      await expect(handler(fakeJob({ sourceId: 'default' }))).rejects.toThrow(/stall_timeout/);
+    } finally {
+      if (prevStall === undefined) delete process.env.GBRAIN_EMBED_STALL_ABORT_SECONDS;
+      else process.env.GBRAIN_EMBED_STALL_ABORT_SECONDS = prevStall;
+    }
+  }, 20_000);
+
+  test("cap value 'off' still removes the ceiling entirely (not misconfiguration)", async () => {
+    configureUnpricedEmbeddingModel();
+    await engine.setConfig('embed.backfill_max_usd', 'off');
     const handler = makeEmbedBackfillHandler(engine, {
       runStale: async () => {
         const tracker = getCurrentBudgetTracker();
@@ -398,7 +450,6 @@ describe('embed-backfill handler — #4571 unpriced embedding models', () => {
 
     const result = await handler(fakeJob({ sourceId: 'default' }));
     expect(result.status).toBe('success');
-    expect(result.embedded).toBe(1);
     expect(result.budgetCapUsd).toBeUndefined();
   });
 });
