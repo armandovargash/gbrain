@@ -132,6 +132,22 @@ async function cmdList(engine: BrainEngine, args: string[]): Promise<void> {
   const kind = flagValue(args, '--kind') as string | undefined;
   const sort = flagValue(args, '--sort') as 'weight' | 'since_date' | 'created_at' | undefined;
   const expired = flagPresent(args, '--expired');
+  // #4629: --limit/--offset were documented on the takes_list op but never
+  // parsed by the CLI — every `takes list` call silently used the engine
+  // defaults. The engine clamps limit (default 100, cap 500) and floors
+  // offset at 0; the CLI just validates the raw values are integers.
+  const limitRaw = flagValue(args, '--limit');
+  const limit = limitRaw !== undefined ? parseInt(limitRaw, 10) : undefined;
+  if (limit !== undefined && (!Number.isFinite(limit) || limit <= 0)) {
+    console.error(`Invalid --limit "${limitRaw}". Expected a positive integer.`);
+    process.exit(1);
+  }
+  const offsetRaw = flagValue(args, '--offset');
+  const offset = offsetRaw !== undefined ? parseInt(offsetRaw, 10) : undefined;
+  if (offset !== undefined && (!Number.isFinite(offset) || offset < 0)) {
+    console.error(`Invalid --offset "${offsetRaw}". Expected a non-negative integer.`);
+    process.exit(1);
+  }
 
   const takes = await engine.listTakes({
     page_slug: slug,
@@ -139,6 +155,8 @@ async function cmdList(engine: BrainEngine, args: string[]): Promise<void> {
     kind,
     active: expired ? false : true,
     sortBy: sort,
+    limit,
+    offset,
   });
 
   if (json) {
@@ -609,7 +627,7 @@ export async function runTakes(engine: BrainEngine, args: string[]): Promise<voi
 Subcommands:
   takes <slug> [--json] [--who h] [--kind k] [--sort weight|since_date|created_at] [--expired]
                                           List takes for a page
-  takes list [--json] [--who h] [--kind k] [--sort ...] [--expired]
+  takes list [--json] [--who h] [--kind k] [--sort ...] [--expired] [--limit N] [--offset N]
                                           List all active takes across the brain (#2079)
   takes search "<query>" [--semantic] [--limit N] [--json]
                                           Keyword search, or semantic search with --semantic

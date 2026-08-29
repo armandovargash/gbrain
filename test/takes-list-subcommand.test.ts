@@ -74,3 +74,51 @@ describe('gbrain takes list (#2079)', () => {
     expect(out).toContain('Acme will ship the widget by Q3.');
   });
 });
+
+describe('gbrain takes list --limit/--offset (#4629)', () => {
+  // Runs after the #2079 block (which asserts a single-row brain), so the
+  // extra rows are seeded here, not in the file-level beforeAll.
+  beforeAll(async () => {
+    const [row] = await engine.executeRaw<{ id: number }>(
+      `SELECT id FROM pages WHERE slug = 'companies/acme-example'`,
+    );
+    await engine.addTakesBatch([
+      { page_id: row.id, row_num: 2, claim: 'Weight ninety take.', kind: 'take', holder: 'self', weight: 0.9 },
+      { page_id: row.id, row_num: 3, claim: 'Weight fifty take.', kind: 'take', holder: 'self', weight: 0.5 },
+      { page_id: row.id, row_num: 4, claim: 'Weight thirty take.', kind: 'take', holder: 'self', weight: 0.3 },
+    ]);
+  });
+
+  test('`takes list --limit N` caps the row count', async () => {
+    const out = await captureStdout(() =>
+      runTakes(engine, ['list', '--json', '--sort', 'weight', '--limit', '2']));
+    const parsed = JSON.parse(out) as Array<{ claim: string }>;
+    expect(parsed.length).toBe(2);
+    // weight DESC: 0.9 then 0.7 (the #2079 seed row)
+    expect(parsed[0]!.claim).toBe('Weight ninety take.');
+    expect(parsed[1]!.claim).toContain('Acme will ship');
+  });
+
+  test('`takes list --offset N` skips rows (pages with --limit)', async () => {
+    const out = await captureStdout(() =>
+      runTakes(engine, ['list', '--json', '--sort', 'weight', '--limit', '2', '--offset', '2']));
+    const parsed = JSON.parse(out) as Array<{ claim: string }>;
+    expect(parsed.length).toBe(2);
+    expect(parsed[0]!.claim).toBe('Weight fifty take.');
+    expect(parsed[1]!.claim).toBe('Weight thirty take.');
+  });
+
+  test('`takes list --offset N` without --limit uses the engine default limit', async () => {
+    const out = await captureStdout(() =>
+      runTakes(engine, ['list', '--json', '--sort', 'weight', '--offset', '1']));
+    const parsed = JSON.parse(out) as Array<{ claim: string }>;
+    expect(parsed.length).toBe(3);
+    expect(parsed[0]!.claim).toContain('Acme will ship');
+  });
+
+  test('bare `takes list` is unchanged: no limit/offset applied', async () => {
+    const out = await captureStdout(() => runTakes(engine, ['list', '--json']));
+    const parsed = JSON.parse(out) as unknown[];
+    expect(parsed.length).toBe(4);
+  });
+});
