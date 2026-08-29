@@ -13,8 +13,8 @@ contributor fixes land with full credit.**
 - **Takes are fully usable on Postgres again.** `takes embed` no longer
   rejects every take and `takes propose --json` no longer crashes — both were
   broken by the database returning 64-bit ids in a shape the code didn't
-  expect. `takes list` also gained the `--limit`/`--offset` flags its help
-  already implied. (adopted from community PRs, with thanks)
+  expect. `takes list` also gained the `--limit`/`--offset` flags its MCP op
+  already documented. (adopted from community PRs, with thanks)
 - **Reasoning models that think out loud no longer break extraction.** Models
   that emit a `<think>` block before their answer (DeepSeek-R1 and similar)
   previously broke every JSON extractor; the parser now strips the reasoning
@@ -47,7 +47,8 @@ contributor fixes land with full credit.**
   very first sync and internal callers (autopilot, cycle jobs), closing a
   duplicate-import loop. **Say to your agent:** *"exclude the generated/
   folder from my brain's sync"* — your agent runs
-  `gbrain config set sync.exclude '["generated/**"]'`.
+  `gbrain config set sync.exclude 'generated/'` (comma- or newline-separated
+  patterns; a trailing `/` covers the whole subtree).
 - **put_page validates slugs at the boundary** (spaces, traversal shapes, and
   control characters are rejected loudly) while still accepting everything
   the sync importer legitimately produces (`notes/v1.0.0`,
