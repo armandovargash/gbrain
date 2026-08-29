@@ -266,6 +266,12 @@ export interface EmbedResult {
    * corpus-wide outage doesn't bloat structured output. Additive field.
    */
   failure_samples: string[];
+  /**
+   * SUP-3874 heals performed this run (oversized chunks split in place).
+   * Also feeds the stall watchdog's progress key: a mass-heal prelude is
+   * real forward progress, so it must not read as a stall. Additive field.
+   */
+  healed_splits?: number;
   /** True if this run was a dry-run. */
   dryRun: boolean;
   /**
@@ -661,7 +667,11 @@ export async function runEmbedCore(engine: BrainEngine, opts: EmbedOpts): Promis
     const watchdog = stallSeconds > 0
       ? createEmbedStallWatchdog({
           thresholdSeconds: stallSeconds,
-          readProgress: () => result.embedded,
+          // Heals count as forward progress: a corpus-wide oversize-heal
+          // prelude (thousands of getChunks+upsertChunks before the first
+          // embed) is healthy work, not a stall — without this it would
+          // abort deterministically at the same point on every resume.
+          readProgress: () => result.embedded + (result.healed_splits ?? 0),
         })
       : undefined;
 
@@ -1916,8 +1926,10 @@ async function embedAllStale(
           const healed = await observed(pacer, () =>
             healOversizedPageChunks(engine, slug, {
               sourceId: keySourceId,
-              onSplit: (n) =>
-                serr(`\n  ${slug}: split ${n} oversized chunk(s) to fit embedding input limit`),
+              onSplit: (n) => {
+                result.healed_splits = (result.healed_splits ?? 0) + n;
+                serr(`\n  ${slug}: split ${n} oversized chunk(s) to fit embedding input limit`);
+              },
             }),
           );
           if (healed.changed) {

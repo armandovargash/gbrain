@@ -181,6 +181,20 @@ export async function healOversizedPageChunks(
   if (!healed.changed) {
     return { changed: false, splitCount: 0, chunks: existing };
   }
+  // Freshness guard: the embed single-flight lock does not exclude sync
+  // (different lock keys), so a concurrent import may rewrite this page
+  // between our read and this write — clobbering it with pre-sync splits
+  // would silently desync chunk_text from the page content until the next
+  // edit. Re-read and skip on drift; the next drain pass heals the fresh
+  // rows. (Window shrinks to one query; the upsert itself is keyed on
+  // (chunk_index, chunk_text) so an exact-tie write is content-identical.)
+  const recheck = await engine.getChunks(slug, getOpts);
+  const drifted =
+    recheck.length !== existing.length ||
+    recheck.some((c, i) => c.chunk_index !== existing[i].chunk_index || c.chunk_text !== existing[i].chunk_text);
+  if (drifted) {
+    return { changed: false, splitCount: 0, chunks: recheck };
+  }
   opts.onSplit?.(healed.splitCount);
   await engine.upsertChunks(slug, healed.chunks, getOpts);
   const refreshed = await engine.getChunks(slug, getOpts);
