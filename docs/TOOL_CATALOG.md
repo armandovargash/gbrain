@@ -11,7 +11,7 @@ Every non-localOnly operation on the MCP surface: 121 tools across 23 areas. **S
 | Tool | Description | Scope | Starter | Gate |
 |---|---|---|---|---|
 | `get_health` | Brain health dashboard (embed coverage, stale pages, orphans). | admin |  |  |
-| `get_stats` | Brain statistics (page count, chunk count, etc.) | admin |  |  |
+| `get_stats` | Brain statistics (page count, chunk count, etc.). | admin |  |  |
 | `get_status_snapshot` | Snapshot for `gbrain status` thin-client mode: sync freshness + last cycle + queue depths + worker liveness. | admin |  |  |
 | `get_usage` | Aggregate chat usage + cost from the chat_usage_log ledger (per-model and per-phase token counts, cache reads/writes, USD estimates) with explicit coverage fields. | admin |  |  |
 | `quarantine_list` | List quarantined (hidden) and optionally content-flagged pages by scanning page frontmatter, newest-updated first. | admin |  |  |
