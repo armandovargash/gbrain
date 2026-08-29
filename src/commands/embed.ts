@@ -5,6 +5,11 @@ import { carryChunkMetadata, probeEmbedder } from '../core/embed-stale.ts';
 import { chunkText } from '../core/chunkers/recursive.ts';
 import { resolveMaxChunkTokens } from '../core/embedding-input-limit.ts';
 import { healOversizedPageChunks, healedChunksToStaleRows } from '../core/embed-oversize-heal.ts';
+import {
+  createEmbedStallWatchdog,
+  resolveEmbedStallAbortSeconds,
+  EMBED_STALL_CLEANUP_DEADLINE_MS,
+} from '../core/embed-stall.ts';
 import { createProgress, type ProgressReporter } from '../core/progress.ts';
 import { getCliOptions, cliOptsToProgressOptions } from '../core/cli-options.ts';
 import { assertEmbeddingEnabled } from '../core/embedding-dim-check.ts';
@@ -305,6 +310,17 @@ export interface EmbedResult {
     /** High-water mark of acquirers blocked on the permit (sync path). */
     maxWaiters: number;
   };
+  /**
+   * #4599: set when the progress-keyed stall watchdog aborted the drain (no
+   * successful embed progress for GBRAIN_EMBED_STALL_ABORT_SECONDS). The
+   * watchdog already released the single-flight locks and flushed the
+   * summary; partial progress is banked and the run is resumable. Error
+   * RESULT, not a throw (X6): the CLI wrapper maps it to a non-zero exit;
+   * minion handlers throw via `assertEmbedNotStalled` to fail the job.
+   * `failures`/`failure_samples` also carry a stall entry so existing
+   * failures>0 consumers surface it unchanged.
+   */
+  reason?: 'stall_timeout';
 }
 
 /**
@@ -598,46 +614,143 @@ export async function runEmbedCore(engine: BrainEngine, opts: EmbedOpts): Promis
         pacer = createNoopPacer();
       }
     }
-    try {
-      await embedAll(engine, !!opts.stale, !!opts.dryRun, result, opts.onProgress, opts.sourceId, {
-        batchSize: opts.batchSize,
-        priority: opts.priority,
-        catchUp: opts.catchUp,
-        pacer,
-        paceMaxConcurrency,
-        quiet: opts.quiet,
-        includeNullSignature: opts.includeNullSignature,
-      }, drainSignal);
-    } catch (e) {
-      // A heartbeat-triggered abort is a clean, resumable stop (lock_lost is
-      // already set + explained on stderr) — not an error to propagate.
-      if (!(result.lock_lost && e instanceof AbortError)) throw e;
-    } finally {
+    // Shared end-of-drain cleanup: heartbeat stop, pacing summary flush,
+    // single-flight lock release (self-acquired only — caller-held locks stay
+    // with the caller per the heldLocks contract). Idempotent so the normal
+    // drain finally and the #4599 stall watchdog path can both call it: the
+    // stall path must never rely on a dead drain's finally (X5), and a
+    // late-resolving drain must not double-release after the watchdog cleaned
+    // up. Never throws (all steps best-effort).
+    let drainCleanupDone = false;
+    const flushAndRelease = async (): Promise<void> => {
+      if (drainCleanupDone) return;
+      drainCleanupDone = true;
       stopHeartbeat();
-      // E1: surface pacing telemetry (human + structured) when pacing was on.
-      const snap = pacer.snapshot();
-      if (snap.enabled) {
-        result.pacing = {
-          maxConcurrency: snap.maxConcurrency,
-          samples: snap.sampleCount,
-          ewmaMs: snap.ewmaMs,
-          totalSleptMs: snap.totalSleptMs,
-          sleeps: snap.sleepCount,
-          maxWaiters: snap.maxWaiters,
-        };
-        serr(
-          `  [embed] pacing: cap=${snap.maxConcurrency} samples=${snap.sampleCount} ` +
-            `ewma=${snap.ewmaMs === null ? 'n/a' : Math.round(snap.ewmaMs) + 'ms'} ` +
-            `slept=${snap.totalSleptMs}ms/${snap.sleepCount}`,
-        );
-      }
-      pacer.dispose();
+      try {
+        // E1: surface pacing telemetry (human + structured) when pacing was on.
+        const snap = pacer.snapshot();
+        if (snap.enabled) {
+          result.pacing = {
+            maxConcurrency: snap.maxConcurrency,
+            samples: snap.sampleCount,
+            ewmaMs: snap.ewmaMs,
+            totalSleptMs: snap.totalSleptMs,
+            sleeps: snap.sleepCount,
+            maxWaiters: snap.maxWaiters,
+          };
+          serr(
+            `  [embed] pacing: cap=${snap.maxConcurrency} samples=${snap.sampleCount} ` +
+              `ewma=${snap.ewmaMs === null ? 'n/a' : Math.round(snap.ewmaMs) + 'ms'} ` +
+              `slept=${snap.totalSleptMs}ms/${snap.sleepCount}`,
+          );
+        }
+        pacer.dispose();
+      } catch { /* telemetry must never block cleanup */ }
       // E-2: release single-flight locks (reverse order). Best-effort; the
       // lock TTL is the backstop if a release fails.
       for (const h of sfLocks.reverse()) {
         try { await h.release(); } catch { /* best-effort; TTL covers it */ }
       }
+    };
+
+    // #4599: progress-keyed stall watchdog (mirror of sync's #1950 — see
+    // src/core/embed-stall.ts for the two-clock design and the operator
+    // notes). Armed for real drains only; dryRun never embeds so "no
+    // successful progress" is its normal state, and 0/negative disables.
+    const stallSeconds = opts.dryRun ? 0 : resolveEmbedStallAbortSeconds();
+    const watchdog = stallSeconds > 0
+      ? createEmbedStallWatchdog({
+          thresholdSeconds: stallSeconds,
+          readProgress: () => result.embedded,
+        })
+      : undefined;
+
+    // The drain runs as a captured promise so the watchdog can RACE it: a
+    // wedged drain (#4599 class — lost promise, abort-ignoring HTTP call)
+    // never returns, so awaiting it directly would also never return. Errors
+    // are captured, not thrown, so a post-stall late rejection can never
+    // become an unhandled rejection.
+    let drainError: { err: unknown } | undefined;
+    const drain = (async () => {
+      try {
+        await embedAll(engine, !!opts.stale, !!opts.dryRun, result, opts.onProgress, opts.sourceId, {
+          batchSize: opts.batchSize,
+          priority: opts.priority,
+          catchUp: opts.catchUp,
+          pacer,
+          paceMaxConcurrency,
+          quiet: opts.quiet,
+          includeNullSignature: opts.includeNullSignature,
+        }, drainSignal);
+      } catch (e) {
+        // A heartbeat-triggered abort is a clean, resumable stop (lock_lost is
+        // already set + explained on stderr) — not an error to propagate.
+        if (!(result.lock_lost && e instanceof AbortError)) drainError = { err: e };
+      } finally {
+        await flushAndRelease();
+      }
+    })();
+
+    if (!watchdog) {
+      await drain;
+      if (drainError) throw drainError.err;
+      return result;
     }
+    let outcome: 'drained' | 'stalled';
+    let stallInfo: import('../core/embed-stall.ts').EmbedStallInfo | undefined;
+    try {
+      outcome = await Promise.race([
+        drain.then(() => 'drained' as const),
+        watchdog.stalled.then((info) => {
+          stallInfo = info;
+          return 'stalled' as const;
+        }),
+      ]);
+    } finally {
+      watchdog.stop();
+    }
+    if (outcome === 'drained') {
+      if (drainError) throw drainError.err;
+      return result;
+    }
+
+    // Stall fired. The drain may be dead — perform the watchdog's OWN bounded
+    // cleanup (X5/T5) instead of waiting on the drain's finally: abort
+    // whatever is still listening, release the single-flight locks via the
+    // direct engine-backed handles, flush the summary, and return an error
+    // RESULT (X6 — no process.exit below the CLI layer). If cleanup itself
+    // wedges (same dead pool), the ~10s deadline forces the return and the
+    // lock TTL is the backstop. A late-resolving drain finds
+    // drainCleanupDone=true and skips.
+    const apiNote = stallInfo?.msSinceLastApiResponse == null
+      ? 'no embedding-API responses observed this run (drain wedged before/inside a call)'
+      : `last embedding-API response ${Math.round(stallInfo.msSinceLastApiResponse / 1000)}s ago ` +
+        '(alive but not succeeding — retry storms trip this by design)';
+    serr(
+      `  [embed] no successful embed progress for ${stallSeconds}s — aborting (stall watchdog, refs #4599); ${apiNote}. ` +
+        `Partial progress is banked (embedded=${result.embedded}); single-flight locks released; re-run to resume. ` +
+        'Tune via GBRAIN_EMBED_STALL_ABORT_SECONDS (0 disables).',
+    );
+    lockAbort.abort();
+    // Deadline timer is REFERENCED on purpose: after stop()/stopHeartbeat it
+    // may be the only live handle — unref'ing it could let a wedged cleanup
+    // become a silent exit-0 instead of reaching the force path.
+    let cleanupDeadline: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([
+      flushAndRelease(),
+      new Promise<void>((r) => { cleanupDeadline = setTimeout(r, EMBED_STALL_CLEANUP_DEADLINE_MS); }),
+    ]);
+    if (cleanupDeadline !== undefined) clearTimeout(cleanupDeadline);
+    if (!drainCleanupDone) {
+      serr('  [embed] stall cleanup exceeded its deadline; lock TTL is the release backstop.');
+    }
+    recordFailure(
+      result,
+      1,
+      '<stall-watchdog>',
+      new Error(`stall_timeout: no successful embed progress for ${stallSeconds}s`),
+    );
+    result.reason = 'stall_timeout';
     return result;
   }
   if (opts.slug) {
@@ -814,6 +927,15 @@ export async function runEmbed(engine: BrainEngine, args: string[]): Promise<Emb
     // non-zero exit verdict.
     if (result.failures > 0) {
       serr(`[embed] ${result.failures} chunk(s) failed to embed. First error: ${result.failure_samples[0] ?? 'unknown'}`);
+    }
+    // #4599 (X6): the stall watchdog returns an error RESULT from core; ONLY
+    // this CLI wrapper maps it to a hard non-zero process exit. Hard exit on
+    // purpose: the wedged drain may hold handles that would keep an exited-
+    // verdict process alive forever. The watchdog already released the
+    // single-flight locks and flushed the summary.
+    if (result.reason === 'stall_timeout') {
+      serr('[embed] exiting non-zero: stall watchdog aborted the drain (reason: stall_timeout); partial progress banked — re-run to resume.');
+      process.exit(1);
     }
     return result;
   } catch (e) {

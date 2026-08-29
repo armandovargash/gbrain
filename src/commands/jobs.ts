@@ -2248,6 +2248,10 @@ export async function registerBuiltinHandlers(
         job.updateProgress({ done, total, embedded, phase: 'embed.pages' }).catch(() => {});
       },
     });
+    // #4599 (X6): a stall-watchdog abort is an error RESULT from core; the
+    // handler layer converts it to a FAILED JOB (throw) — never process.exit.
+    const { assertEmbedNotStalled } = await import('../core/embed-stall.ts');
+    assertEmbedNotStalled(embedResult);
     // Report what happened, not a constant. `embedded: true` claimed a dry run
     // had embedded, which is the same lie in miniature: `gbrain jobs get`
     // showed it. `embedded` stays the key it always was and stays truthy on a
@@ -3026,7 +3030,7 @@ export async function registerBuiltinHandlers(
       priority?: 'recent';
       includeNullSignature?: boolean;
     };
-    return await runEmbedCore(engine, {
+    const catchUpResult = await runEmbedCore(engine, {
       stale: true,
       catchUp: true,
       batchSize: data.batchSize,
@@ -3036,6 +3040,10 @@ export async function registerBuiltinHandlers(
       // widening through; absent = grandfather clause stays (unchanged).
       includeNullSignature: !!data.includeNullSignature,
     });
+    // #4599 (X6): stall abort → failed job (throw), same as the embed handler.
+    const { assertEmbedNotStalled } = await import('../core/embed-stall.ts');
+    assertEmbedNotStalled(catchUpResult);
+    return catchUpResult;
   });
 
   // v0.42 type-unification (T10): unify-types PROTECTED handler. Pack-upgrade
