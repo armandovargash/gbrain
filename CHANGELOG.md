@@ -4,8 +4,9 @@ All notable changes to GBrain will be documented in this file.
 
 ## [0.47.7.0] - 2026-08-30
 
-**The test-infra speed wave: the local suite runs 3× faster and comes back
-green on machines it used to fail on, the CI matrix sheds its heaviest atom,
+**The test-infra speed wave: the local suite runs up to 3× faster on
+memory-constrained machines and comes back green on machines it used to fail
+on, the CI matrix sheds its heaviest atom,
 and the e2e lane finally gets the schema-snapshot fast path every other lane
 already had.**
 
@@ -37,7 +38,7 @@ already had.**
 
 - **The unit suite's slowest files were rewritten into minimal forms with
   assertion parity.** Thirteen files keep every test and every assertion while
-  running 1.5-8× faster (batched CLI spawns through a bounded pool, condition
+  running 1.2-8.6× faster (batched CLI spawns through a bounded pool, condition
   polling instead of fixed sleeps, one engine + reset instead of per-test
   boots, a build-once git fixture). Four attempted rewrites were reverted
   with documented cause rather than shipped at risk.
@@ -64,8 +65,9 @@ already had.**
   (condition polling), `with-snapshot` (scoped cold-boot opt-out),
   `resetPgliteStateNarrow` (explicit-table resets), `git-fixture`
   (build-once repos), and environment probes (`fs-perms`,
-  `git-stderr-probe`). Each ships with its own unit test; docs/TESTING.md
-  carries the reach-for guide.
+  `git-stderr-probe`). The speed helpers each ship with their own unit test
+  (the two environment probes are exercised through their consumer suites);
+  docs/TESTING.md carries the reach-for guide.
 
 To take advantage of v0.47.7.0: `gbrain upgrade`, then in the repo the fast
 loop is the same `bun run test` — just faster and honest about environment
