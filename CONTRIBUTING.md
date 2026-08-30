@@ -111,7 +111,7 @@ bun run test:full                 # verify + parallel unit + slow + smart e2e
 
 # Slow / serial / e2e in isolation
 bun run test:slow                 # *.slow.test.ts only (cold-path correctness)
-bun run test:serial               # *.serial.test.ts only (--max-concurrency=1)
+bun run test:serial               # *.serial.test.ts only (pooled per-file processes, heaviest-first)
 bun run test:e2e                  # real-Postgres E2E (requires DATABASE_URL)
 
 # E2E setup (Postgres with pgvector)

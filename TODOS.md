@@ -4639,7 +4639,8 @@ outside-voice triage on the reshaped plan.
   speedup pass: an in-repo canonical qrels target now exists (`gbrain eval gate`
   with the deterministic embedder option against `test/fixtures/eval-baselines/
   qrels-search.json`; runner `scripts/run-eval-canary.ts`, CI-gated via
-  check:eval-canary, ledger `.gbrain-evals/eval-results.jsonl`). What remains
+  `test/eval-canary.test.ts` in the unit matrix with `check:eval-canary` as
+  the on-demand package script, ledger `.gbrain-evals/eval-results.jsonl`). What remains
   here is only the sibling-repo REGRESSION baseline (.baseline.ndjson for the
   jaccard/top1 gate) — the correctness-gate half is done.
 
