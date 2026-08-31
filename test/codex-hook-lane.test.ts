@@ -43,7 +43,7 @@ describe('parseCodexHookTranscript', () => {
   test('fixture parses: turns exclude injected context and tool output; calls carry observed args keys, span-stamped', () => {
     const p = join(dir, 'rollout-1.jsonl');
     writeFileSync(p, [meta, injected, user('fix the failing order tests'), customCall, callOutput, assistant('done — pushed the fix'), '{torn'].join('\n') + '\n');
-    const parsed = parseCodexHookTranscript(p);
+    const parsed = parseCodexHookTranscript(p, { collectToolCalls: true });
     expect(parsed.sessionId).toBe('cdx-sess-1');
     expect(parsed.cwd).toBe('/repo');
     expect(parsed.turns.map((t) => t.text)).toEqual(['fix the failing order tests', 'done — pushed the fix']);
@@ -60,7 +60,9 @@ describe('parseCodexHookTranscript', () => {
     const p = join(dir, 'rollout-2.jsonl');
     const rawArgs = JSON.stringify({ timestamp: 't', type: 'response_item', payload: { type: 'function_call', name: 'shell', arguments: 'not json at all' } });
     writeFileSync(p, [meta, user('run it'), fnCall, rawArgs].join('\n') + '\n');
-    const parsed = parseCodexHookTranscript(p);
+    const parsed = parseCodexHookTranscript(p, { collectToolCalls: true });
+    // Same opt-in contract as the claude parser: the bare parse collects nothing.
+    expect(parseCodexHookTranscript(p).toolCalls).toEqual([]);
     expect(parsed.toolCalls).toEqual([
       { name: 'shell', input: { command: ['bash', '-lc', 'bun test'] } },
       { name: 'shell', input: 'not json at all' },

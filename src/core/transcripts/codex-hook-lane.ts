@@ -34,7 +34,7 @@ import { join } from 'node:path';
 import { codexSessionsDir } from '../bootstrap/host-specs.ts';
 import { isPathContained } from '../path-confine.ts';
 import type { ConfineTranscriptResult, ParsedTranscript, ToolCallRecord } from './claude-code-jsonl.ts';
-import { TRANSCRIPT_HARD_CAP_BYTES, TRANSCRIPT_MAX_BYTES_DEFAULT } from './claude-code-jsonl.ts';
+import { capToolCallInput, TRANSCRIPT_HARD_CAP_BYTES, TRANSCRIPT_MAX_BYTES_DEFAULT } from './claude-code-jsonl.ts';
 import type { WindowTurn } from '../context/entity-salience.ts';
 import { mapCodexLine } from './codex.ts';
 
@@ -88,8 +88,9 @@ export function parseCodexHookTranscript(
   opts: { maxBytes?: number; collectToolCalls?: boolean } = {},
 ): ParsedCodexTranscript {
   // Same contract as parseTranscript's collectToolCalls: the data exists only
-  // for the memorable receipt, so the gate-off default path skips it.
-  const collectToolCalls = opts.collectToolCalls !== false;
+  // for the memorable receipt, so collection is OPT-IN — the session-end lane
+  // asks only when the memorable gate is open.
+  const collectToolCalls = opts.collectToolCalls === true;
   const budget = Math.max(1, Math.floor(opts.maxBytes ?? TRANSCRIPT_MAX_BYTES_DEFAULT));
   const size = statSync(path).size;
   let raw: string;
@@ -149,7 +150,9 @@ export function parseCodexHookTranscript(
         // `result`: 0.147.0 persists no success flag on *_output rows and an
         // inferred ok would be a lie (see mapCodexLine).
         if (collectToolCalls) {
-          toolCalls.push({ name: mapped.name, input: mapped.input });
+          // Same per-string bound as the claude lane's record — one ceiling
+          // for every harness, or the receipt-size cap only holds for one.
+          toolCalls.push({ name: mapped.name, input: capToolCallInput(mapped.input) });
           toolCallTurnIndexes.push(turns.length);
         }
         break;

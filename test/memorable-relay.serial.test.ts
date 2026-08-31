@@ -152,6 +152,43 @@ describe('claude-code lane (session-end hook)', () => {
     expect(readFileSync(marker, 'utf8').trim().split('\n').filter(Boolean)).toHaveLength(1);
   });
 
+  test('the receipt carries real args post-redaction, the result outcome, and never the planted secret (#4743 pin)', async () => {
+    await optInFully();
+    stubRelay();
+    const transcriptRoot = join(tmp, 'projects');
+    mkdirSync(transcriptRoot, { recursive: true });
+    const planted = 'sk-' + 'FAKEfakeFAKEfake1234567890';
+    const transcript = join(transcriptRoot, 'sess-tools.jsonl');
+    writeFileSync(transcript, [
+      JSON.stringify({ type: 'user', message: { role: 'user', content: 'deploy it' } }),
+      JSON.stringify({
+        type: 'assistant',
+        message: {
+          role: 'assistant',
+          content: [{ type: 'tool_use', id: 'tu-1', name: 'Bash', input: { command: `deploy --key ${planted}` } }],
+        },
+      }),
+      JSON.stringify({
+        type: 'user',
+        message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tu-1', content: 'ok' }] },
+      }),
+    ].join('\n') + '\n');
+    const stdin = JSON.stringify({ session_id: 'sess-tools', transcript_path: transcript, cwd: join(tmp, 'ws') });
+    await runHook(['session-end'], { stdin, write: sink().write, transcriptRoot, spawnPush: () => {} });
+
+    const [receipt] = await readSessionReceiptsTail(1);
+    expect(receipt!.session_id).toBe('sess-tools');
+    expect(receipt!.secret_scan_ok).toBe(true);
+    const calls = JSON.parse(receipt!.tool_calls_json) as Array<{ name: string; input: { command: string }; result?: { ok: boolean } }>;
+    expect(calls[0]!.name).toBe('Bash');
+    // The real command, with the secret scrubbed by the SAME pass the corpus
+    // goes through — not a second redaction implementation.
+    expect(calls[0]!.input.command).toContain('deploy --key');
+    expect(receipt!.tool_calls_json).not.toContain(planted);
+    // The joined outcome survives serialization into the receipt.
+    expect(calls[0]!.result).toEqual({ ok: true });
+  });
+
   test('fire-and-forget: the hook returns while a slow child is still running', async () => {
     await optInFully();
     // 6s child vs a 4s wall-clock bound: the gap absorbs loaded-CI-runner

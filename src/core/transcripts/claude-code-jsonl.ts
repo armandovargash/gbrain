@@ -225,11 +225,13 @@ export function parseTranscript(
   path: string,
   opts: { maxBytes?: number; collectToolCalls?: boolean } = {},
 ): ParsedTranscript {
-  // Tool calls exist only for the memorable receipt; when the caller knows
-  // the gate is off (the default population), skip the per-entry collection,
-  // the results map, and the join — and never retain tool INPUTS (which can
-  // embed whole file contents) for users who never opted in.
-  const collectToolCalls = opts.collectToolCalls !== false;
+  // Tool calls exist only for the memorable receipt, so collection is OPT-IN:
+  // the per-prompt lanes parse this file in front of every prompt, and a
+  // default-on here would make every one of those parses collect and retain
+  // tool INPUTS (which can embed whole file contents) for users who never
+  // opted in. The session-end lane is the only caller that asks, and only
+  // when the memorable gate is open.
+  const collectToolCalls = opts.collectToolCalls === true;
   const maxBytes = Math.max(1, Math.floor(opts.maxBytes ?? TRANSCRIPT_MAX_BYTES_DEFAULT));
   const size = statSync(path).size;
 
@@ -301,7 +303,7 @@ export function parseTranscript(
   // stays free of transcript-internal identifiers.
   const joinedToolCalls: ToolCallRecord[] = toolCalls.map((c) => {
     const ok = c.id !== undefined ? toolResults.get(c.id) : undefined;
-    return { name: c.name, input: c.input, ...(ok !== undefined ? { result: { ok } } : {}) };
+    return { name: c.name, input: capToolCallInput(c.input), ...(ok !== undefined ? { result: { ok } } : {}) };
   });
   return { turns, injectedContextBlocks, bytesRead, parsedLines, skippedLines, compactBoundaries, boundaryTurnIndexes, toolCalls: joinedToolCalls, toolCallTurnIndexes };
 }
@@ -449,6 +451,41 @@ function entryToToolCalls(entry: unknown): ToolCallWithId[] {
     }
   }
   return calls;
+}
+
+/**
+ * Per-STRING cap on tool-call input values in the collected record. A Write
+ * call carries the whole file body in `input.content`; uncapped, one such
+ * call makes the receipt line (and the relay payload derived from it)
+ * arbitrarily large. Facts under the cap are never rewritten; over it, the
+ * truncation is explicit — `…[N chars omitted]` — so a consumer can tell a
+ * capped value from a short one. (From #4743, contributed by @NIkhil-cmd-cmd.)
+ */
+export const TOOL_CALL_VALUE_MAX_CHARS = 32_000;
+
+/** Recursion guard for pathological inputs; past it the value reads as null. */
+const TOOL_CALL_MAX_DEPTH = 8;
+
+/**
+ * Bound every string inside a tool-call input (recursing through arrays and
+ * objects) to TOOL_CALL_VALUE_MAX_CHARS. Exported for the codex hook lane,
+ * which collects observed args through its own parser — both lanes must
+ * bound the record identically or the receipt-size ceiling only holds for
+ * one harness.
+ */
+export function capToolCallInput(value: unknown, depth = 0): unknown {
+  if (typeof value === 'string') {
+    if (value.length <= TOOL_CALL_VALUE_MAX_CHARS) return value;
+    return `${value.slice(0, TOOL_CALL_VALUE_MAX_CHARS)}…[${value.length - TOOL_CALL_VALUE_MAX_CHARS} chars omitted]`;
+  }
+  if (depth >= TOOL_CALL_MAX_DEPTH) return null;
+  if (Array.isArray(value)) return value.map((v) => capToolCallInput(v, depth + 1));
+  if (value !== null && typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) out[k] = capToolCallInput(v, depth + 1);
+    return out;
+  }
+  return value;
 }
 
 /** tool_result blocks in one entry → [{tool_use_id, ok}]. `ok` is `is_error !== true`. */

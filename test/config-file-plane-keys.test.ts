@@ -308,6 +308,10 @@ describe('config set integrations.memorable.enabled — the disclosure consent g
       const r = await captureAll(() => runConfig(noEngine, ['set', 'integrations.memorable.enabled', 'true', '--yes']));
       expect(r.out).toContain('Consent recorded');
       expect(r.out).toContain('Set integrations.memorable.enabled = true');
+      // The enable banner names the off switches — the env kill switch is
+      // documented nowhere else in gbrain's own output. (#4743 pin)
+      expect(r.out).toContain('Turn off:');
+      expect(r.out).toContain('GBRAIN_MEMORABLE=0');
       const stamp = await readMemorableConsent();
       expect(stamp).not.toBeNull();
       expect(stamp!.harnesses).toContain('claude-code');
@@ -338,6 +342,28 @@ describe('config set integrations.memorable.enabled — the disclosure consent g
       const cfg = JSON.parse(readFileSync(join(parent, '.gbrain', 'config.json'), 'utf8')) as { integrations?: { memorable?: { enabled?: boolean } } };
       expect(cfg.integrations?.memorable?.enabled).toBeUndefined();
     });
+  });
+
+  test('every off-ish spelling writes literal false without prompting (#4743 pin)', async () => {
+    const parent = mkdtempSync(join(tmpdir(), 'gb-cfg-mem-offish-'));
+    await withEnv({ GBRAIN_HOME: parent, GBRAIN_MEMORABLE: undefined }, async () => {
+      const cfgPath = join(parent, '.gbrain', 'config.json');
+      for (const spelling of ['false', 'off', 'no', '0', 'nonsense']) {
+        const r = await captureAll(() => runConfig(noEngine, ['set', 'integrations.memorable.enabled', spelling]));
+        // The false path is not a consent event: no disclosure, no refusal,
+        // and the stored value is a real boolean — a string here would still
+        // read as OFF at the gate, but the file must say what it means.
+        expect(r.out).toContain('= false');
+        expect(r.exitCode).toBeNull();
+        const cfg = JSON.parse(readFileSync(cfgPath, 'utf8')) as { integrations?: { memorable?: { enabled?: unknown } } };
+        expect(cfg.integrations?.memorable?.enabled).toBe(false);
+      }
+    });
+  });
+
+  test('the key is registered in KNOWN_CONFIG_KEYS, so `config get` does not report it unknown (#4743 pin)', async () => {
+    const { KNOWN_CONFIG_KEYS } = await import('../src/core/config.ts');
+    expect(KNOWN_CONFIG_KEYS).toContain('integrations.memorable.enabled');
   });
 
   test('the out-of-band state: flag true (as `memorable enable` writes it) but no stamp — gate stays closed', async () => {

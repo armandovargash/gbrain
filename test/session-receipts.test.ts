@@ -35,6 +35,11 @@ describe('session-receipts', () => {
     const home = tempHome();
     try {
       await withEnv({ GBRAIN_HOME: home }, async () => {
+        // The exact path the doctor check and the relay both hardcode — a
+        // silent move breaks every consumer at once. (#4743 pin)
+        expect(await sessionReceiptsPath()).toBe(
+          join(home, '.gbrain', 'integrations', 'hooks', 'session-receipts.jsonl'),
+        );
         await appendSessionReceipt({
           session_id: 'sess-1',
           harness: 'claude-code',
@@ -52,6 +57,55 @@ describe('session-receipts', () => {
         expect(tail[0].content_hash).toBe('abc123');
         expect(tail[0].secret_scan_ok).toBe(true);
         expect(typeof tail[0].ts).toBe('string');
+        expect(Number.isNaN(Date.parse(tail[0].ts))).toBe(false);
+      });
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test('the file is 0600 inside a 0700 directory, the heartbeat contract (#4743 pin)', async () => {
+    const home = tempHome();
+    try {
+      await withEnv({ GBRAIN_HOME: home }, async () => {
+        await appendSessionReceipt({
+          session_id: 'sess-mode',
+          harness: 'claude-code',
+          corpus_path: '/tmp/sess-mode.txt',
+          content_hash: 'mode1',
+          turn_count: 1,
+          workspace_root: '/repo',
+          tool_calls_json: '[]',
+          secret_scan_ok: true,
+        });
+        const p = await sessionReceiptsPath();
+        expect(statSync(p).mode & 0o777).toBe(0o600);
+        expect(statSync(join(home, '.gbrain', 'integrations', 'hooks')).mode & 0o777).toBe(0o700);
+        expect(statSync(join(home, '.gbrain', 'integrations')).mode & 0o777).toBe(0o700);
+      });
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test('a receipt-write failure never throws into the hook it describes, and reports false (#4743 pin)', async () => {
+    // GBRAIN_HOME pointed at a path that cannot become a directory.
+    const home = tempHome();
+    const notADir = join(home, 'file');
+    writeFileSync(notADir, 'x');
+    try {
+      await withEnv({ GBRAIN_HOME: notADir }, async () => {
+        const wrote = await appendSessionReceipt({
+          session_id: 'sess-broken',
+          harness: 'claude-code',
+          corpus_path: '/tmp/sess-broken.txt',
+          content_hash: 'broken1',
+          turn_count: 1,
+          workspace_root: '/repo',
+          tool_calls_json: '[]',
+          secret_scan_ok: true,
+        });
+        expect(wrote).toBe(false);
       });
     } finally {
       rmSync(home, { recursive: true, force: true });
@@ -187,6 +241,24 @@ describe('receipt compaction is bounded by bytes, not only by lines', () => {
         const tail = await readSessionReceiptsTail(50);
         expect(tail.length).toBeGreaterThan(0);
         expect(tail[tail.length - 1]!.session_id).toBe('sess-11');
+
+        // Headroom pin (#4743): the trim leaves the file at TARGET (half the
+        // ceiling), so the very next append must NOT re-trigger a whole-file
+        // rewrite. A tmp+rename rewrite changes the inode — and the rename
+        // window is the one place a concurrent O_APPEND line can be dropped,
+        // so at steady state it has to be rare, not once per session end.
+        const inoAfterTrim = statSync(p).ino;
+        await appendSessionReceipt({
+          session_id: 'sess-after-trim',
+          harness: 'claude-code',
+          corpus_path: '/tmp/sess-after-trim.txt',
+          content_hash: 'after-trim',
+          turn_count: 1,
+          workspace_root: '/repo',
+          tool_calls_json: fat,
+          secret_scan_ok: true,
+        });
+        expect(statSync(p).ino).toBe(inoAfterTrim);
       });
     } finally {
       rmSync(home, { recursive: true, force: true });
@@ -379,7 +451,12 @@ describe('memorableGateAllowed — one gate vocabulary for hook, engine, doctor'
         expect((await memorableGateAllowed(null)).reason).toBe('disabled');
         expect((await memorableGateAllowed({})).reason).toBe('disabled');
         expect((await memorableGateAllowed({ integrations: { memorable: { enabled: false } } })).reason).toBe('disabled');
-        expect((await memorableGateAllowed({ integrations: { memorable: { enabled: 'true' as unknown as boolean } } })).reason).toBe('disabled');
+        // isConfigTruthy accepts "true"/"on"/"yes"/1 for OTHER keys; this gate
+        // deliberately does not, so a hand-edited config can only fail closed.
+        for (const v of ['true', 'on', 'yes', 1, 0, null, {}, []]) {
+          const cfg = { integrations: { memorable: { enabled: v as unknown as boolean } } };
+          expect((await memorableGateAllowed(cfg)).reason).toBe('disabled');
+        }
       });
     } finally { rmSync(home, { recursive: true, force: true }); }
   });
