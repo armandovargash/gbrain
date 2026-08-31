@@ -13,11 +13,18 @@
  *     │                       │     degenerate ──► report only, NEVER cached
  *     │                       └─ budget exhausted ──► deferred (next run continues)
  *     ▼
- *   gate: score >= dream.triage.threshold  (read-time — retune = zero re-judge)
+ *   gate (passesTriageGate — ONE decision for reports/fan-out/retriage):
+ *     score >= dream.triage.threshold ──────────────────────► PASS
+ *     score in [rescue_floor, threshold) AND content_type in
+ *       the buried-signal allowlist AND >= rescue_min_segments
+ *       of the judge's segments verify as normalized transcript
+ *       substrings (F2 rescue, $0, gate-time only) ──────────► PASS (rescued)
+ *     (read-time — retuning threshold or rescue knobs = zero re-judge)
  *     ▼
  *   buildSynthesisPrompt + TRIAGE MAP block ──► one subagent per passing
  *   transcript chunk (max_turns = dream.synthesize.max_turns), drained inline
- *   in a private per-run queue ──► put_page slug collection ──► provenance
+ *   in a private per-run queue ──► put_page slug collection ──► quote
+ *   verify/repair (synthesize-verify.ts, F1b — new pages only) ──► provenance
  *   stamp ──► reverse-write ──► summary index.
  *
  * Hard guarantees:
@@ -105,8 +112,14 @@ const DEFAULT_SUBAGENT_WAIT_TIMEOUT_MS = 35 * 60 * 1000;
  * Triage prompt-schema version. Bump when the judge prompt or output schema
  * changes in a way that makes old scores incomparable — cached rows with a
  * different version are treated as misses and re-judged (cheap, utility tier).
+ *
+ * v2 (eval write-path fix wave): peak-not-average scoring clarification +
+ * concrete-facts segment-selection nudge. The bump invalidates every cached
+ * verdict; the first post-upgrade cycle re-judges the corpus bounded by
+ * dream.triage.max_ms (deferred files continue next cycle), and
+ * `gbrain dream retriage` is the operator remedy for a full sweep.
  */
-export const TRIAGE_VERSION = 1;
+export const TRIAGE_VERSION = 2;
 /**
  * Fixed constant used ONLY to derive the stored `worth_processing` boolean at
  * write time (back-compat for boolean-era readers). The RUNTIME gate is
@@ -1918,6 +1931,9 @@ HIGH signal (score 0.70-1.0):
 - The user reflects on themselves, names patterns, processes emotion
 - The user discusses specific people, companies, or decisions in depth
 - The user makes a strategic call worth remembering
+Score by the transcript's PEAK signal, not its average: a mostly-routine
+transcript containing one clearly synthesis-worthy passage scores by that
+passage.
 MEDIUM (score 0.30-0.69): some original thought mixed into routine content.
 LOW (score 0.0-0.29): routine ops ("check my email", "schedule X"), pure code
 debugging without reflection, short exchanges with no original thought,
@@ -1932,8 +1948,9 @@ Respond with ONLY a JSON object:
   "entities": ["<person, company, or project named in the transcript>"],
   "reasons": ["<short phrase>", "<short phrase>"]
 }
-At most 8 segments (the most synthesis-worthy passages), at most 12 entities,
-two reasons. Quote verbatim; never paraphrase inside "quote".`;
+At most 8 segments (the most synthesis-worthy passages — prefer passages
+carrying concrete facts and decisions), at most 12 entities, two reasons.
+Quote verbatim; never paraphrase inside "quote".`;
 
   const msg = await client.create({
     model: verdictModel,
