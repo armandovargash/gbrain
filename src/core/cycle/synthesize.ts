@@ -74,6 +74,8 @@ import type { Page, PageType } from '../types.ts';
 import { validateSourceId } from '../utils.ts';
 import { safeSplitIndex } from '../text-safe.ts';
 import { PAGE_SLUG_SEG } from '../cjk.ts';
+import { withChatPhase } from '../ai/chat-usage.ts';
+import { canonicalLookup } from '../model-pricing.ts';
 
 // Slug grammar from validatePageSlug — shared via PAGE_SLUG_SEG (#738).
 // Used for the orchestrator-written summary index slug. `u` flag required
@@ -341,6 +343,18 @@ export async function runPhaseSynthesize(
   engine: BrainEngine,
   opts: SynthesizePhaseOpts,
 ): Promise<PhaseResult> {
+  // F6 spend attribution: triage-judge + orchestrator gateway calls inside
+  // this phase land in chat_usage_log as phase:synthesize. Child subagent
+  // calls keep their own job:* tag — the innermost AsyncLocalStorage phase
+  // wins (minions/worker.ts wraps each job), and that is intentional: the
+  // authoritative child spend rolls up from minion_jobs token columns below.
+  return withChatPhase('phase:synthesize', () => runPhaseSynthesizeInner(engine, opts));
+}
+
+async function runPhaseSynthesizeInner(
+  engine: BrainEngine,
+  opts: SynthesizePhaseOpts,
+): Promise<PhaseResult> {
   const start = Date.now();
   let ownedPrivateQueue: { queue: MinionQueue; name: string } | null = null;
   // Normalize brainDir to an absolute path BEFORE any reverse-write. Without
@@ -488,6 +502,12 @@ export async function runPhaseSynthesize(
       deferred: pass.deferred,
       degraded: degradedCount,
       below_threshold: pass.reports.filter(r => r.score !== null && !r.worth).length,
+      // F6 spend visibility: judge-call tokens for this pass's cache MISSES
+      // (hits are free); cost estimate from canonical pricing, null when the
+      // triage model has no canonical price — never a fake 0.
+      tokens_in: pass.tokens.in,
+      tokens_out: pass.tokens.out,
+      cost_usd: priceChatUsd(config.triage.model, { in: pass.tokens.in, out: pass.tokens.out }),
     };
     // 3A: a time-boxed cold pass must never read as mass rejection.
     const deferralSuffix = pass.deferred > 0
@@ -973,7 +993,11 @@ export async function runPhaseSynthesize(
     // (source, slug) row. #1586: refs are stamped with the cycle's resolved
     // source (children write there via SubagentHandlerData.source_id;
     // cycleSourceId is hoisted above the fan-out for the daily cap).
-    const writtenRefs = await collectChildPutPageSlugs(engine, childIds, chunkInfo, cycleSourceId, jobRawSource);
+    // F6 rule-D visibility: track which children actually wrote pages, so a
+    // rescued/passed transcript whose child declined to write (task D) is
+    // distinguishable from a triage miss in the phase telemetry.
+    const jobsWithPages = new Set<number>();
+    const writtenRefs = await collectChildPutPageSlugs(engine, childIds, chunkInfo, cycleSourceId, jobRawSource, jobsWithPages);
 
     const summaryDate = opts.date ?? today();
 
@@ -1045,12 +1069,20 @@ export async function runPhaseSynthesize(
     let queueWaitP95: number | null = null;
     let runtimeP50: number | null = null;
     let runtimeP95: number | null = null;
+    // F6 child spend: summed from minion_jobs token columns — the ONE
+    // authority for child spend (children's gateway rows in chat_usage_log
+    // keep their own job:* phase tag; never sum both ledgers). minion_jobs
+    // has NO cache-write column, hence the honest cost_basis label below.
+    let childTokensIn = 0;
+    let childTokensOut = 0;
+    let childTokensCacheRead = 0;
     try {
-      const timing = await engine.executeRaw<{ created_at: Date | string; started_at: Date | string | null; finished_at: Date | string | null }>(
-        `SELECT created_at, started_at, finished_at FROM minion_jobs WHERE id = ANY($1::bigint[])`,
+      const timing = await engine.executeRaw<{ created_at: Date | string; started_at: Date | string | null; finished_at: Date | string | null; tokens_input: number | string | null; tokens_output: number | string | null; tokens_cache_read: number | string | null }>(
+        `SELECT created_at, started_at, finished_at, tokens_input, tokens_output, tokens_cache_read FROM minion_jobs WHERE id = ANY($1::bigint[])`,
         [childIds],
       );
       const ts = (v: Date | string | null): number | null => v == null ? null : (v instanceof Date ? v.getTime() : new Date(v).getTime());
+      const num = (v: number | string | null): number => v == null ? 0 : Number(v) || 0;
       const waits: number[] = [];
       const runtimes: number[] = [];
       for (const row of timing) {
@@ -1059,12 +1091,35 @@ export async function runPhaseSynthesize(
         const finished = ts(row.finished_at);
         if (created != null && started != null && started >= created) waits.push(started - created);
         if (started != null && finished != null && finished >= started) runtimes.push(finished - started);
+        childTokensIn += num(row.tokens_input);
+        childTokensOut += num(row.tokens_output);
+        childTokensCacheRead += num(row.tokens_cache_read);
       }
       queueWaitP50 = percentile(waits, 50);
       queueWaitP95 = percentile(waits, 95);
       runtimeP50 = percentile(runtimes, 50);
       runtimeP95 = percentile(runtimes, 95);
     } catch { /* telemetry is best-effort */ }
+    // Child cost is an ESTIMATE priced at the configured synthesize model
+    // (minion_jobs does not record per-job model); null when unpriced.
+    const childCostUsd = priceChatUsd(config.model, { in: childTokensIn, out: childTokensOut, cacheRead: childTokensCacheRead });
+    const spendBlock = {
+      cost_basis: 'in+out+cache_read' as const,
+      children: {
+        tokens_in: childTokensIn,
+        tokens_out: childTokensOut,
+        tokens_cache_read: childTokensCacheRead,
+        cost_usd: childCostUsd,
+      },
+      triage: {
+        tokens_in: triageDetails.tokens_in,
+        tokens_out: triageDetails.tokens_out,
+        cost_usd: triageDetails.cost_usd,
+      },
+      total_usd: childCostUsd != null && triageDetails.cost_usd != null
+        ? Math.round((childCostUsd + triageDetails.cost_usd) * 1e6) / 1e6
+        : null,
+    };
 
     // CDX-4 phase outcome gate: dead children must not masquerade as a clean
     // phase. Vocabulary discipline: 'dead'/'cancelled' are TERMINAL failures
@@ -1100,6 +1155,8 @@ export async function runPhaseSynthesize(
             inline_concurrency_effective: effectiveConcurrency,
             dead_jobs: deadChildren.length,
             degraded: true,
+            // F6: dead children may still have burned tokens before dying.
+            spend: spendBlock,
           },
         });
     }
@@ -1177,6 +1234,15 @@ export async function runPhaseSynthesize(
         dead_jobs: deadChildren.length,
         non_completed_jobs: failedChildren.length,
         degraded: failedChildren.length > 0,
+        // F6 rule-D visibility: completed children that wrote ZERO pages —
+        // the "significance passed but content still routine" disposition.
+        // Distinguishes a child that declined (task D) from a triage miss.
+        children_zero_pages: childOutcomes.filter(
+          o => o.status === 'completed' && !jobsWithPages.has(o.jobId),
+        ).length,
+        // F6: phase spend, from the two authoritative sources (minion_jobs
+        // child counters + triage pass usage). cost_usd null when unpriced.
+        spend: spendBlock,
       },
     });
   } catch (e) {
@@ -1708,6 +1774,12 @@ export interface TriageResult {
    * the transcript instead of permanently trusting a degenerate rejection.
    */
   unreliable?: 'truncated' | 'refusal' | 'unparseable';
+  /**
+   * F6: judge-call token usage when the client surfaced it (gateway clients
+   * do; legacy SDK-shape mocks may not). Present on degenerate results too —
+   * the call was paid whether or not the verdict parsed.
+   */
+  tokens?: { in: number; out: number };
 }
 
 /** Degenerate TriageResult factory — score 0, never cached (unreliable is always set). */
@@ -1820,6 +1892,15 @@ two reasons. Quote verbatim; never paraphrase inside "quote".`;
   // but the gateway adapter (and newer SDKs) can emit it.
   const stopReasonRaw = (msg as { stop_reason?: string | null }).stop_reason;
   const truncated = stopReasonRaw === 'max_tokens';
+  // F6: capture judge-call usage once; attached to EVERY return below —
+  // the call was paid whether or not the verdict came back reliable.
+  const rawUsage = (msg as { usage?: { input_tokens?: unknown; output_tokens?: unknown } }).usage;
+  const callTokens = rawUsage
+    && typeof rawUsage.input_tokens === 'number' && Number.isFinite(rawUsage.input_tokens)
+    && typeof rawUsage.output_tokens === 'number' && Number.isFinite(rawUsage.output_tokens)
+    ? { in: rawUsage.input_tokens, out: rawUsage.output_tokens }
+    : undefined;
+  const withTokens = (r: TriageResult): TriageResult => (callTokens ? { ...r, tokens: callTokens } : r);
   const refused = stopReasonRaw === 'refusal';
   const abnormalStop: TriageResult['unreliable'] | undefined =
     truncated ? 'truncated' : refused ? 'refusal' : undefined;
@@ -1845,7 +1926,7 @@ two reasons. Quote verbatim; never paraphrase inside "quote".`;
     // clamped — clamping would cache a fabricated verdict (same poison class
     // the unreliable contract exists to prevent).
     if (score < 0 || score > 1) {
-      return degenerateTriage('unparseable', `score out of range: ${score}`);
+      return withTokens(degenerateTriage('unparseable', `score out of range: ${score}`));
     }
     // Optional fields are LENIENT — bad shapes are dropped/nulled, never
     // unreliable on their own. Only the score is load-bearing.
@@ -1886,18 +1967,18 @@ two reasons. Quote verbatim; never paraphrase inside "quote".`;
       worth_processing: score >= DEFAULT_TRIAGE_THRESHOLD,
       reasons,
     };
-    return abnormalStop ? { ...result, unreliable: abnormalStop } : result;
+    return withTokens(abnormalStop ? { ...result, unreliable: abnormalStop } : result);
   }
 
   // Couldn't parse a scored verdict — default to NOT processing this cycle,
   // but flag the result unreliable so it is never cached permanently.
   if (truncated) {
-    return degenerateTriage('truncated', 'judge response truncated (stop_reason=max_tokens)');
+    return withTokens(degenerateTriage('truncated', 'judge response truncated (stop_reason=max_tokens)'));
   }
   if (refused) {
-    return degenerateTriage('refusal', 'judge response refused or content-filtered (stop_reason=refusal)');
+    return withTokens(degenerateTriage('refusal', 'judge response refused or content-filtered (stop_reason=refusal)'));
   }
-  return degenerateTriage('unparseable', 'judge response unparseable');
+  return withTokens(degenerateTriage('unparseable', 'judge response unparseable'));
 }
 
 // ── Synth-v2 idempotency-key grammar (#4152 retriage) ─────────────────
@@ -1974,6 +2055,22 @@ export function dreamInlineQueueAgeMs(queueName: string, nowMs = Date.now()): nu
   return nowMs - ts;
 }
 
+/**
+ * F6: price a chat call from the canonical table. Returns null when the model
+ * has no canonical pricing — never a fake 0 (house rule, chat-usage.ts).
+ * cache_read falls back to the input rate when the provider's cache pricing
+ * is unverified (conservative over-estimate, same fallback chat-usage uses).
+ */
+function priceChatUsd(model: string, tokens: { in: number; out: number; cacheRead?: number }): number | null {
+  const p = canonicalLookup(model);
+  if (!p) return null;
+  const cacheRead = tokens.cacheRead ?? 0;
+  const usd = (tokens.in / 1e6) * p.input
+    + (tokens.out / 1e6) * p.output
+    + (cacheRead / 1e6) * (p.cache_read ?? p.input);
+  return Math.round(usd * 1e6) / 1e6;
+}
+
 export interface TriagePassCfg {
   /** Resolved triage model (provider-prefixed or bare claude-*). Part of cache validity. */
   model: string;
@@ -2022,6 +2119,8 @@ export interface TriagePassResult {
   cacheHits: number;
   unreliable: number;
   deferred: number;
+  /** F6: summed judge-call usage across cache MISSES this pass (hits are free). */
+  tokens: { in: number; out: number };
 }
 
 /**
@@ -2068,6 +2167,8 @@ export async function runTriagePass(
   let cacheHits = 0;
   let unreliableCount = 0;
   let deferredCount = 0;
+  let tokensIn = 0;
+  let tokensOut = 0;
 
   let cursor = 0;
   let abortError: unknown = null;
@@ -2154,6 +2255,10 @@ export async function runTriagePass(
         if (cfg.shouldStop?.()) stopped = true;
       }
       judged++;
+      if (triage.tokens) {
+        tokensIn += triage.tokens.in;
+        tokensOut += triage.tokens.out;
+      }
       if (triage.unreliable) {
         // Degenerate judgement — do NOT write it to dream_verdicts: a cached
         // rejection is permanent for this content hash, and a triage model
@@ -2270,7 +2375,7 @@ export async function runTriagePass(
     }
   }
 
-  return { reports, byPath, judged, cacheHits, unreliable: unreliableCount, deferred: deferredCount };
+  return { reports, byPath, judged, cacheHits, unreliable: unreliableCount, deferred: deferredCount, tokens: { in: tokensIn, out: tokensOut } };
 }
 
 // ── Subagent prompt ──────────────────────────────────────────────────
@@ -2483,6 +2588,10 @@ async function collectChildPutPageSlugs(
   chunkInfo: Map<number, { idx: number; hash6: string }>,
   sourceId = 'default',
   jobRawSource?: Map<number, string>,
+  // F6 out-param (backwards-compatible with the __testing call sites):
+  // collects the job ids that produced ≥1 put_page write, so the caller can
+  // count zero-page children without a second subagent_tool_executions scan.
+  outJobsWithPages?: Set<number>,
 ): Promise<Array<{ slug: string; source_id: string; raw_source?: string }>> {
   if (childIds.length === 0) return [];
   // Raw fetch — NO SELECT DISTINCT. Preserves per-child slug duplicates so
@@ -2513,6 +2622,7 @@ async function collectChildPutPageSlugs(
     // Postgres decodes the BIGINT FK as bigint; both metadata maps are keyed
     // by the INTEGER minion job id represented as a JavaScript number.
     const jobId = Number(r.job_id);
+    outJobsWithPages?.add(jobId);
     const ci = chunkInfo.get(jobId);
     const slug = ci ? rewriteChunkedSlug(r.slug, ci.hash6, ci.idx) : r.slug;
     if (!rewritten.has(slug) || rewritten.get(slug) === undefined) {
