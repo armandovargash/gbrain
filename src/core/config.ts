@@ -1297,6 +1297,7 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
   // and inline-drain concurrency (default 1; clamped [1,8]; PGLite forced 1).
   'dream.synthesize.mode',
   'dream.synthesize.link_manifest',
+  'dream.synthesize.quote_verify',
   'dream.synthesize.inline_concurrency',
   // #4152 triage knobs. The triage model's preferred key is
   // `models.dream.triage` (models.* prefix, registered via the models.dream.*

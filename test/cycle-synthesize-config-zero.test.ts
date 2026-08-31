@@ -28,6 +28,15 @@ describe('loadSynthConfig honors a configured 0', () => {
     expect(cfg.minChars).toBe(2000);
   });
 
+  test('quote_verify defaults ON; false/0/off disable; anything else stays on', async () => {
+    expect((await __testing.loadSynthConfig(stubEngine({}))).quoteVerify).toBe(true);
+    for (const off of ['false', '0', 'off', ' FALSE ', 'Off']) {
+      const cfg = await __testing.loadSynthConfig(stubEngine({ 'dream.synthesize.quote_verify': off }));
+      expect(cfg.quoteVerify).toBe(false);
+    }
+    expect((await __testing.loadSynthConfig(stubEngine({ 'dream.synthesize.quote_verify': 'yes' }))).quoteVerify).toBe(true);
+  });
+
   test('unparseable values fall back to the defaults', async () => {
     const cfg = await __testing.loadSynthConfig(stubEngine({
       'dream.synthesize.cooldown_hours': 'abc',
