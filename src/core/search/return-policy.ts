@@ -22,7 +22,13 @@
  * Pure + dependency-light so it unit-tests in isolation.
  */
 
-export type AdaptiveQueryIntent = 'entity' | 'temporal' | 'event' | 'general';
+/**
+ * 2026-08 fix wave (E5c): now the FULL QueryIntent union — 'concept' joined
+ * so hybrid.ts no longer coerces it to 'general'. Cap mapping is unchanged in
+ * effect ('entity' → entityMax, everything else → otherMax): concept queries
+ * are exactly the ones that want breadth.
+ */
+export type AdaptiveQueryIntent = 'entity' | 'temporal' | 'event' | 'concept' | 'general';
 
 export interface AdaptiveReturnConfig {
   /** Master switch. Default false — no behavior change for existing callers. */

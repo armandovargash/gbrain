@@ -949,7 +949,7 @@ export function attributeKnob<K extends keyof ModeBundle>(
 // within cache.ttl_seconds (3600s default). (Authored as 23→24 on the
 // wave-g branch; 24 and 25 were claimed by the two bumps above while it
 // was in flight, so it takes the next free number per the D8 convention.)
-export const KNOBS_HASH_VERSION = 26;
+export const KNOBS_HASH_VERSION = 27;
 
 /**
  * v0.36 (D8 / CDX-2) — second-arg context for the cache key. The
@@ -988,6 +988,20 @@ export interface KnobsHashContext {
    * 'none' for legacy callers that don't thread excludes.
    */
   hardExcludes?: string[];
+  /**
+   * v=27 (2026-08 fix wave, E5b): the RESOLVED adaptive-return gate for this
+   * call — params + the query's resolved intent class (classifier-
+   * deterministic, computed pre-lookup by hybridSearchCached). Enabled folds
+   * all five parts; disabled/absent hashes like legacy rows. See the ar=/ari=
+   * comment in knobsHash for the cross-intent contamination rationale.
+   */
+  adaptiveReturn?: {
+    enabled: boolean;
+    entityMax: number;
+    otherMax: number;
+    minKeep: number;
+    intent: string;
+  };
   /**
    * v=16 (#3515): the EFFECTIVE detail level for this call — per-call
    * SearchOpts.detail, or the auto-detected level when the caller didn't
@@ -1173,6 +1187,22 @@ export function knobsHash(
     `sal=${ctx?.salience ?? 'off'}`,
     `rec=${ctx?.recency ?? 'off'}`,
     `ipat=${ctx?.intentPatterns ?? 'none'}`,
+    // v=27 additions (2026-08 fix wave, E5b + outside-voice F11, append-only):
+    // adaptive-return gate params + the query's resolved intent class. An
+    // adaptive-on write (intent-capped result set) must never serve an
+    // adaptive-off lookup or a different cap config — and because the
+    // semantic cache admits SIMILAR queries, an entity-intent row (cap 2)
+    // must never serve a concept-intent lookup (cap 6) either; folding the
+    // resolved intent class closes that channel (same-query lookups are
+    // classifier-deterministic; near-duplicate queries with a different
+    // class simply miss). Residual, documented: a future classifier change
+    // reclassifies queries and silently re-keys — acceptable, cache-only.
+    // Gate-off calls hash identically to legacy rows ('0'/'none' fallbacks).
+    `ar=${ctx?.adaptiveReturn?.enabled ? 1 : 0}`,
+    `arem=${ctx?.adaptiveReturn?.enabled ? ctx.adaptiveReturn.entityMax : 'none'}`,
+    `arom=${ctx?.adaptiveReturn?.enabled ? ctx.adaptiveReturn.otherMax : 'none'}`,
+    `armk=${ctx?.adaptiveReturn?.enabled ? ctx.adaptiveReturn.minKeep : 'none'}`,
+    `ari=${ctx?.adaptiveReturn?.enabled ? ctx.adaptiveReturn.intent : 'none'}`,
   ];
   const h = createHash('sha256');
   h.update(parts.join('|'));

@@ -95,6 +95,6 @@ describe('KNOBS_HASH_VERSION', () => {
     // #4358 residual: 23→24 negative-offset cache-skip gap.
     // 24→25: kof= (keyword AND→OR fallback knob) joins the key.
     // 25→26: sal=/rec=/ipat= — salience/recency + intent_patterns fold (#4415).
-    expect(KNOBS_HASH_VERSION).toBe(26);
+    expect(KNOBS_HASH_VERSION).toBe(27);
   });
 });

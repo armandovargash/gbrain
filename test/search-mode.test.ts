@@ -450,7 +450,10 @@ describe('knobsHash determinism + cross-mode separation (CDX-4)', () => {
     // (pagedRequest previously skipped only offset>0).
     // 24→25: kof= (keyword AND→OR fallback knob) joins the key.
     // 25→26: sal=/rec=/ipat= — salience/recency + intent_patterns fold (#4415).
-    expect(KNOBS_HASH_VERSION).toBe(26);
+    // 26→27: ar=/arem=/arom=/armk=/ari= — adaptive-return gate params +
+    // resolved intent class fold (2026-08 fix wave E5b + outside-voice F11);
+    // adaptive-on calls now cache instead of skipping.
+    expect(KNOBS_HASH_VERSION).toBe(27);
   });
 
   test('#3515: detail set vs unset produces DIFFERENT hashes (cache contamination prevention)', () => {
@@ -475,7 +478,10 @@ describe('knobsHash determinism + cross-mode separation (CDX-4)', () => {
     // #4358 residual: 23→24 negative-offset cache-skip gap.
     // 24→25: kof= (keyword AND→OR fallback knob) joins the key.
     // 25→26: sal=/rec=/ipat= — salience/recency + intent_patterns fold (#4415).
-    expect(KNOBS_HASH_VERSION).toBe(26);
+    // 26→27: ar=/arem=/arom=/armk=/ari= — adaptive-return gate params +
+    // resolved intent class fold (2026-08 fix wave E5b + outside-voice F11);
+    // adaptive-on calls now cache instead of skipping.
+    expect(KNOBS_HASH_VERSION).toBe(27);
   });
 
   test('#4352 follow-up: excludePrivate true vs false produces DIFFERENT hashes (cache contamination prevention)', () => {
@@ -692,7 +698,7 @@ describe('v0.40.4 — graph_signals knob', () => {
 
 describe('v0.42.3.0 — autocut knobs', () => {
   test('KNOBS_HASH_VERSION is 26 (21→22 result-stamp/injection epoch #1663 #3995 #3783 #4220; 22→23 excludePrivate posture fold #4352; 23→24 negative-offset cache-skip gap #4358 residual; 24→25 keywordOrFallback knob kof=; 25→26 salience/recency + intent_patterns fold #4415)', () => {
-    expect(KNOBS_HASH_VERSION).toBe(26);
+    expect(KNOBS_HASH_VERSION).toBe(27);
   });
 
   test('bundle defaults: conservative off, balanced/tokenmax on @0.20', () => {
@@ -900,5 +906,32 @@ describe('keywordOrFallback knob (v=25)', () => {
     const on = knobsHash(resolveSearchMode({ mode: 'balanced' }));
     const off = knobsHash(resolveSearchMode({ mode: 'balanced', overrides: { keywordOrFallback: false } }));
     expect(on).not.toBe(off);
+  });
+});
+
+describe('adaptive-return knobs hash fold (v=27, 2026-08 fix wave E5b)', () => {
+  const knobs = resolveSearchMode({ mode: 'balanced' });
+  const ar = (over: Partial<{ enabled: boolean; entityMax: number; otherMax: number; minKeep: number; intent: string }>) =>
+    knobsHash(knobs, {
+      adaptiveReturn: { enabled: true, entityMax: 2, otherMax: 6, minKeep: 1, intent: 'general', ...over },
+    });
+
+  test('gate-off and absent-ctx hash identically (legacy rows stay reachable)', () => {
+    expect(knobsHash(knobs, { adaptiveReturn: { enabled: false, entityMax: 2, otherMax: 6, minKeep: 1, intent: 'entity' } }))
+      .toBe(knobsHash(knobs));
+  });
+
+  test('gate-on diverges from gate-off', () => {
+    expect(ar({})).not.toBe(knobsHash(knobs));
+  });
+
+  test('differing caps diverge (an e1/o1 row cannot serve an e1/o2 lookup)', () => {
+    expect(ar({ otherMax: 1 })).not.toBe(ar({ otherMax: 2 }));
+    expect(ar({ entityMax: 1 })).not.toBe(ar({ entityMax: 2 }));
+    expect(ar({ minKeep: 2 })).not.toBe(ar({ minKeep: 1 }));
+  });
+
+  test('differing resolved intent class diverges (outside-voice F11: an entity-capped row cannot serve a concept lookup via semantic similarity)', () => {
+    expect(ar({ intent: 'entity' })).not.toBe(ar({ intent: 'concept' }));
   });
 });

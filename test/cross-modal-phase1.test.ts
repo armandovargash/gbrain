@@ -208,7 +208,7 @@ describe('D2 — knobsHash differs across cross-modal knob values', () => {
     // same cache row an offset=0 request shares.
     // 24→25 (#3617): kof= (keyword AND→OR fallback knob) joins the key.
     // 25→26: sal=/rec=/ipat= — salience/recency + intent_patterns fold (#4415).
-    expect(KNOBS_HASH_VERSION).toBe(26);
+    expect(KNOBS_HASH_VERSION).toBe(27);
   });
 
   test('flipping unified_multimodal changes the hash', () => {

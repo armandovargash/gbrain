@@ -28,7 +28,6 @@ import {
   resolveAdaptiveReturn,
   applyAdaptiveReturn,
   adaptiveReturnFromConfig,
-  adaptiveReturnEnabled,
   type AdaptiveReturnDecision,
 } from './return-policy.ts';
 import { applyAutocut, type AutocutDecision } from './autocut.ts';
@@ -2048,9 +2047,17 @@ export async function hybridSearch(
         }
         fused.sort((a, b) => b.score - a.score);
       }
-      // Widen per-page dedup cap when walking.
+      // Widen per-page dedup cap when walking — but an EXPLICIT per-call
+      // maxPerPage is never silently overridden (CEO review D8): tightest
+      // wins. A caller asking for maxPerPage:1 (session diversity) keeps 1
+      // even under a walk; callers without an explicit cap get the widened
+      // walk cap as before.
       const capFromWalk = Math.min(10, Math.max(walkDepth * 5, 5));
-      dedupOpts = { ...(dedupOpts ?? {}), maxPerPage: capFromWalk };
+      const explicitCap = dedupOpts?.maxPerPage;
+      dedupOpts = {
+        ...(dedupOpts ?? {}),
+        maxPerPage: explicitCap === undefined ? capFromWalk : Math.min(explicitCap, capFromWalk),
+      };
     } catch {
       // Expansion is best-effort — missing edge tables or a transient
       // DB error must not break base hybrid retrieval.
@@ -2135,12 +2142,11 @@ export async function hybridSearch(
   let returnPool = aliasHopped;
   let adaptiveDecision: AdaptiveReturnDecision | undefined;
   if (adaptiveCfg.enabled && offset === 0) {
-    // v0.46.15: 'concept' maps to the recall-preserving 'general' cap for
-    // adaptive return — the narrower AdaptiveQueryIntent union predates the
-    // concept intent, and concept queries are exactly the ones that want
-    // breadth (widening the union is the adaptive-ablation wave's call).
-    const adaptiveIntent = suggestions.intent === 'concept' ? 'general' : suggestions.intent;
-    const r = applyAdaptiveReturn(aliasHopped, adaptiveIntent, adaptiveCfg);
+    // 2026-08 fix wave (E5c): AdaptiveQueryIntent now equals the full
+    // QueryIntent union, so the classifier's intent passes through unchanged
+    // ('concept' → otherMax, the breadth cap). The cache key folds this SAME
+    // intent class (ari= in knobsHash v=27) so cross-intent rows never serve.
+    const r = applyAdaptiveReturn(aliasHopped, suggestions.intent, adaptiveCfg);
     returnPool = r.kept;
     adaptiveDecision = r.decision;
   }
@@ -2364,6 +2370,15 @@ export async function hybridSearchCached(
   const intentStateForCache = await loadEngineIntentPatterns(engine);
   const cacheSuggestions = classifyQuery(query, intentStateForCache.banks);
 
+  // 2026-08 fix wave (E5b): resolve the adaptive-return gate ONCE for both
+  // the cache key and the (former) skip decision. Adaptive-on calls now
+  // cache — the gate params + the query's resolved intent class fold into
+  // knobsHash (v=27) so gate-off/-on and cross-intent rows never cross-serve.
+  const adaptiveResolvedForCache = resolveAdaptiveReturn(
+    opts?.adaptiveReturn,
+    adaptiveReturnFromConfig(cfgCached as unknown as Record<string, unknown> | null),
+  );
+
   // Cache key carries the column + provider so different embedding spaces
   // never collide on the same `(source_id, query_text)` row.
   const cacheKnobsHash = knobsHash(resolvedForCache, {
@@ -2401,6 +2416,15 @@ export async function hybridSearchCached(
     // rows that can never be served to (or written by) a trusted
     // private-included call.
     excludePrivate: opts?.excludePrivate === true,
+    // v=27 (E5b) — the resolved gate + this query's intent class, classified
+    // by the SAME pattern-aware banks bare hybridSearch resolves (above).
+    adaptiveReturn: {
+      enabled: adaptiveResolvedForCache.enabled,
+      entityMax: adaptiveResolvedForCache.entityMax,
+      otherMax: adaptiveResolvedForCache.otherMax,
+      minKeep: adaptiveResolvedForCache.minKeep,
+      intent: cacheSuggestions.intent,
+    },
   });
 
   // Cache decision: opts.useCache (explicit) wins over global config; global
@@ -2419,14 +2443,14 @@ export async function hybridSearchCached(
   // a non-default embedding column (per-call or via config default —
   // D8 closes the silent-corruption bug class), or near-symbol mode
   // (structural state that the cache can't safely express).
-  // v0.42 — when adaptive return-sizing is on, skip the cache: a gated
-  // (trimmed) result set must not be served to a gate-off lookup, and vice
-  // versa. Folding the gate params into knobsHash is the v0.42+ follow-up
-  // (TODO) that lets adaptive-on calls cache safely; until then, skip.
-  const adaptiveReturnOn = adaptiveReturnEnabled(
-    opts?.adaptiveReturn,
-    cfgCached as unknown as Record<string, unknown> | null,
-  );
+  // 2026-08 fix wave (E5b): adaptive-on no longer skips — the gate params +
+  // intent class are folded into knobsHash (v=27) above, so adaptive-on
+  // calls cache safely within same-config same-intent matches.
+  // Per-call dedupOpts DOES skip (CEO review D8 adjunct): it is
+  // result-affecting (maxPerPage/cosine/type-ratio overrides) but not part
+  // of the hash — a maxPerPage:1 caller must never be served a stored
+  // maxPerPage:2 page (and vice versa). Fold-into-hash is only warranted if
+  // a config-plane dedup key ships later.
   // #3442: date-filtered requests skip the cache — since/until are not part
   // of knobsHash, so a filtered result set could be served to an unfiltered
   // lookup (and vice versa). Relative forms ('60d') also resolve to a
@@ -2468,7 +2492,7 @@ export async function hybridSearchCached(
     (opts?.walkDepth ?? 0) > 0 ||
     Boolean(opts?.nearSymbol) ||
     isNonDefaultColumn ||
-    adaptiveReturnOn ||
+    opts?.dedupOpts !== undefined ||
     dateFiltered ||
     typeFiltered ||
     pagedRequest;
