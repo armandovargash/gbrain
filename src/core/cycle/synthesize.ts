@@ -2566,11 +2566,13 @@ CONTEXT
 - Source file basename: ${baseSlugSegment}${chunkBanner}${priorContradictionsBlock}${triageMapBlock}${linkManifestBlock}${allowedPathsBlock}
 
 OUTPUT POLICY (ALL of these are required)
-1. Quote the user verbatim. Do not paraphrase memorable phrasings.
+1. Quote the user verbatim. Quotation marks are ONLY for spans reproducible EXACTLY from the transcript below — if you cannot reproduce a span exactly, paraphrase it WITHOUT quotation marks. Do not paraphrase memorable phrasings you can quote exactly.
 2. ${crossRefRule}
 3. Do NOT write to any path outside the ALLOWED WRITE PATHS above${allowedSlugPrefixes.length > 0 ? '' : ' (shown in the put_page schema)'}.
 4. Slug discipline: lowercase alphanumeric and hyphens only, slash-separated segments. NO underscores, NO file extensions.
 5. Self-contained opening: begin every new page's body with a 2-3 sentence summary that a reader unfamiliar with this transcript could understand on its own, before any quotes or detail. Do not assume the reader has the source conversation for context.
+6. Preserve concrete facts: carry the specific numbers, dates, dollar amounts, names, and who-decided-what OF the salient content you write about, exactly as the transcript states them. Do not add routine logistics for their own sake.
+7. Ground every claim in the transcript. Attribute speculation as speculation ("the user wondered whether..."), and never state a completion state or outcome the transcript does not show.
 
 TASKS
 A. Reflections (self-knowledge, pattern recognition, emotional processing):
