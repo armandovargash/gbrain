@@ -1,5 +1,86 @@
 # TODOS
 
+## Fix-wave follow-ups (filed 2026-08-29, follow-up from the v0.47.x fix wave)
+
+- [ ] **P1 — #4599 root-cause instrumentation loop.** **What:** the embed
+  --stale hang's root cause is UNPINNED (heartbeat theory retracted by the
+  reporter on-thread 2026-08-28; the stall watchdog only bounds it). Build the
+  instrumented binary the reporter offered to run (near-daily repro rig):
+  candidate class is a lost promise in the drain — postgres.js pool +
+  PgBouncer transaction mode + idle_timeout interplay (both repros on port
+  6543). **Where to start:** the drain in src/commands/embed.ts +
+  src/core/embed-stall.ts telemetry; wrap pool acquisition with settle-time
+  tracing.
+- [ ] **P2 — pricing-overrides sweep of the remaining capped BudgetTracker
+  sites.** **What:** #4571/#4633 wired `loadPricingOverrides` into
+  embed-backfill + the three Conversation Facts entry points, but ~6 capped
+  sites still omit it (extract-atoms, skillopt, reindex-code, remediation,
+  eval-contradictions, brainbench) — 3rd recurrence of the class since #4312.
+  **Fix shape:** a factory helper (tracker-with-overrides) or a grep guard so
+  a new capped BudgetTracker without overrides fails at PR time.
+- [ ] **P2 — `<think>`-strip sweep of hand-rolled LLM JSON parsers.** **What:**
+  #4640 fixed parseLlmJson + the facts/atoms extractors and exported
+  `stripReasoningBlocks`, but ~13 hand-rolled brace-scan sites remain
+  (judges, grade-takes, drift, voice-gate, calibration-profile, chronicle,
+  facts/classify, loops-extract, skillopt x3, eval json-repair, think/index);
+  propose-takes.ts carries its own duplicate regex to converge.
+- [ ] **P2 — verify gpt-5.6-terra / gpt-5.6-sol canonical prices.** **What:**
+  while live-verifying luna (#4560), OpenAI's official pricing page listed
+  terra at $2.00/$12.00 and sol at $4.00/$20.00 vs CANONICAL_PRICING's
+  $2.50/$15.00 and $5.00/$30.00. Repo overprices → budget gates throttle
+  early (safe direction, no overspend), but the table should be re-verified
+  and corrected with its own `price_last_verified` refresh.
+- [ ] **P1 — #4616 PGLite vector-search reachability.** **What:** recently
+  written pages can be unreachable by vector search while doctor reports 100%
+  embedding coverage (suspected HNSW divergence after the auto WAL-repair;
+  heap vectors intact — recoverable, not lossy). **Fix shape (from triage):**
+  PGLite branch for vector-index dropAndRebuild + a contract-first
+  `reindex_vector` admin op + doctor self-recall reachability probe (ANN-query
+  the K most recent chunks with their own vectors) + rebuild-or-flag after WAL
+  repair. Design care: probe false positives (exact-scan columns, empty
+  index); inline-vs-queued rebuild after repair.
+- [ ] **P3 — hoist prompt-too-long helpers to a shared module.** **What:**
+  #4675 has subagent-oneshot.ts import isPromptTooLongError/
+  extractPromptTooLongDetail from subagent.ts while subagent.ts imports
+  runSubagentOneshot — a call-time-safe but structurally fragile import cycle.
+- [ ] **P3 — surface-aware MCP initialize instructions.** **What:** the #4643
+  contract constant references get_page/put_page/list_skills/get_skill, which
+  don't exist on `--surface verbs`; serve the verb-appropriate contract per
+  surface.
+- [ ] **P3 — per-source sync.exclude scoping.** **What:** #4667's persisted
+  exclude scope is global (union-only widening across every source); a
+  per-source key was the author's own follow-up note.
+- [ ] **P3 — skills-doc note on capture-time vs retroactive backlink dating.**
+  **What:** #4552/#4595 made backlink REPAIR insert undated "Referenced by"
+  rows (retroactive dating is forgery), while live capture keeps dated
+  "Referenced in" timeline entries — one line in skills/_brain-filing-rules.md
+  + quality.md + signal-detector so agents don't "fix" the divergence.
+- [ ] **P3 — unify the slug grammar repo-wide + surface legacy invalid slugs.**
+  **What:** put_page now validates via a widened local grammar
+  (dots/underscores as continuation chars) while cjk.ts's PAGE_SLUG_SEG stays
+  narrower for cite-render/slug-registry/dream — unify deliberately. Also add
+  a doctor/lint check listing pages whose slug fails validatePageSlug (Dream
+  historically wrote space-slugs; those rows are now un-updatable via
+  put_page) with rename guidance.
+- [ ] **P3 — engine-parity e2e open_loops reset.** **What:** the parity suite
+  doesn't reset open_loops between runs, so a leftover row in a shared
+  DATABASE_URL database flakes the round-trip test (observed during #4587
+  verification; fresh DB → green). Add a per-run cleanup or unique key.
+
+## Schema-bootstrap coverage follow-ups (filed 2026-08-29, follow-up from the #4657 P0 fix)
+
+- [ ] **P3 — Extend the blob forward-reference gates beyond CREATE INDEX.**
+  **What:** `test/schema-bootstrap-coverage.test.ts` now gates CREATE INDEX
+  column references on BOTH schema blobs (PGLite A2 check + the #4657
+  Postgres-blob class-closure gate), but forward references through
+  constraints, views, trigger bodies, and partial-index WHERE clauses are
+  not parsed. **Why:** the #4657 class (4th recurrence) proved blob-only
+  forward references break zero locally-runnable tests; the remaining DDL
+  forms are the same shape through a different syntax. **Where to start:**
+  extend `parseIndexColumnReferences` siblings for `CHECK`/`REFERENCES`/
+  `CREATE TRIGGER` bodies against `SCHEMA_SQL` + `PGLITE_SCHEMA_SQL`, reuse
+  `buildIndexRefCoveragePredicate`, keep the exemption-with-rationale bar.
+
 ## Gmail open-loop engine follow-ups (filed 2026-08-25, follow-up from the gmail-open-loop-engine wave)
 
 - [ ] **P1 — gbrain.io hosted OAuth relay: server build + CASA clock.**
@@ -1194,6 +1275,22 @@
   vs DB-outage windows without new plumbing.
 ## v0.47 SEPTEMBER REMOVAL — ZeroEntropy (filed v0.46.3.0; TARGET: ship 2026-09-04..2026-09-08)
 
+<!-- 2026-08-29 fix-wave addenda for the removal executor:
+  (a) A post-sunset short-circuit now ships ahead of this wave (refs #3657):
+      past 2026-09-04 the rerank path skips the dead HTTP call, fails open,
+      writes one audit row per process per model (reason sunset_short_circuit)
+      and a once-per-process stderr line — so the removal wave inherits a loud,
+      latency-free interim state, not a 5s/query hang.
+  (b) Default-swap decision input from the issue thread: two independent
+      corpus reports found reranking actively HURT (2k-page personal brain —
+      three rerankers demoted short entity pages; 19k-page Japanese corpus —
+      zerank-2 itself 0/6 vs OFF). A/B the voyage default on a real corpus
+      before flipping; "disable in balanced" is a live option. tokenmax must
+      leave zerank regardless.
+  (c) The autocut_min_top re-tune requirement (outside-voice F16, filed at
+      the P2 calibration TODO above) binds to option (a)-style flips only. -->
+
+
 ZeroEntropy's hosted API dies 2026-09-04. v0.46.3.0 deprecated it (split-default:
 new installs → voyage; legacy runtime fallbacks stay ZE; detect-and-notify
 migration). The removal wave deletes the provider and performs the hard cutover.
@@ -1633,15 +1730,68 @@ review-deferred, not fix-now). Grouped by component.
 
 ### Test infra (master-owned)
 
-- [ ] **P1 — test/extract-atoms-chunk-embed.test.ts flakes under parallel
-  shards.** **What:** deflake the extract-atoms chunk-embed suite when run in
-  parallel shards. **Why:** it fails under shard parallelism but passes alone
-  — a shard-ordering trap for every future branch. **Context:** failure
-  signature: extraction returns status 'warn' with ALL transcripts skipped
-  (0 processed) → count assertions fail; env-coupling suspected — the same
-  withEnv class fixed in token-budget.test.ts this wave. Pre-existing on
-  master; owned there, not by any feature branch. **Effort:** small.
-  **Priority:** P1.
+- [ ] **P1 — Test-infra pass Ships 2+3: serial burn-down, e2e lane moves + CI
+  sharding, weights re-mine.** **What:** the approved test-infra plan
+  (`~/.claude/plans/system-instruction-you-are-working-sprightly-bee.md`, Ship 1
+  landed as the v0.47.7.0 wave) deliberately split into 3 ships for regression
+  attribution. Remaining: Phase 4 serial-lane burn-down (38 rename-safe
+  no-marker files + ~75 env-only `withEnv()` conversions — candidate lists with
+  per-file justifications were computed and banked in the Ship-1 session;
+  recompute mechanically: no `mock.module`, no R1 env mutation, no
+  launchTty/process.exitCode/port/timing rationale in the header), Phase 5
+  moving the ~52 PGLite-only `test/e2e/` files into the unit matrix (behavioral
+  move criterion: direct PGLite ctor + no e2e/helpers import + no
+  hasDatabase/DATABASE_URL gate + header read; lockstep: e2e-test-map rows,
+  e2e-unmapped-baseline shrink, classify-tests, seeded weights) + 4-way
+  `SHARD=N/M` matrix for `selected-e2e`/`coverage-full-e2e` with one postgres
+  service per matrix job, and Phase 6 `mine-shard-weights` re-mine (381 files
+  unweighted; add a `weights:mine` package script + documented cadence) then
+  matrix 10→12. Graduated batch gates: 5×-green first batch per class, 2×+CI
+  after. **Why:** the remaining ~half of the measured win: serial lane 220→~130
+  files, e2e 60-min worst-case lane → ~15-25 min, honest weights. **Effort:** L
+  (spread over 2 ships).
+- [ ] **P2 — Phase-2 tail: seven minimal-test targets the v0.47.7.0 wave
+  didn't reach.** **What:** same rewrite classes, unattempted: (1)
+  `test/destructive-guard.test.ts:39` + (2)
+  `test/schema-bootstrap-coverage.test.ts:48` file-level snapshot opt-outs →
+  scoped `withColdPglite` (audit which tests genuinely need cold boots — the
+  bootstrap.test.ts attempt showed version-rewind arcs DO need them; a
+  snapshot-restored engine does not replay migrations after a rewind); (3)
+  `test/migrate.test.ts` 14-engine + (4) `test/sync.test.ts` 4-engine
+  consolidation to shared beforeAll engines + resets (sync also has 39 git
+  execSync sites → `test/helpers/git-fixture.ts`, and a 1100ms sleep →
+  `waitFor`); (5) `test/doctor-pglite-scratch-probe.test.ts` route 3 of 4 real
+  scratch boots through its own `probeFn` seam (:238-298 proves it); (6)
+  `test/apply-migrations-list-db-state` and (7) `test/process-watchdog`
+  .test/.serial pair merges where assertions overlap. **Why:** ~15-25s more off
+  the unit lane using helpers that now exist (`with-snapshot`, `git-fixture`,
+  `wait-for`); several also burn down `scripts/check-test-isolation.allowlist`
+  rows. **Effort:** S-M.
+- [ ] **P3 — serial-pool-overlaps-parallel-shards.** **What:** run the serial
+  pool concurrently with the parallel shards in `run-unit-parallel.sh` instead
+  of after the barrier. **Why deferred:** the OOM-rescue verdict pipeline
+  assumes shard aggregation ran first (`EXTERNAL_KILL_ANY` gates serial rescue
+  eligibility), and both runners independently claim the full memory budget —
+  a restructure, not a tweak; post-burn-down the serial tail is small anyway.
+- [ ] **P3 — e2e tier2/jsonb-parity decoupling.** **What:** `tier2` waits on
+  `jsonb-parity` (the token-spend gate) — up to 15 min of serialization; inline
+  a fast pre-flight instead. Preserve the hard-fail-on-missing-DATABASE_URL
+  property. **Effort:** S.
+
+- [x] **P1 — test/extract-atoms-chunk-embed.test.ts flakes under parallel
+  shards.** DONE (test-infra perf wave): root cause was NOT live-env coupling
+  but the gateway singleton's captured env SNAPSHOT — the preload configures
+  with `env: {...process.env}`, so a shard-neighbor's provider key (e.g.
+  `test/claw-test-cli.test.ts`'s `oai-must-not-leak`) baked into the gateway
+  survives the neighbor's own env restore, flips `isAvailable('embedding')`
+  true, the atom import fires a real embed inside withBudgetTracker,
+  `reserve()` throws BudgetExhausted(no_pricing), and every work item skips →
+  status 'warn' / 0 processed (the signature verbatim). Fix: keyless
+  `configureGateway({env:{}})` pin in the PGLite describe's beforeAll +
+  `resetGateway()` in afterAll + a self-asserting
+  `expect(isAvailable('embedding')).toBe(false)` hermeticity pin — same
+  pattern as test/ambient-recall.test.ts (which also gained the missing
+  `resetGateway()` cleanup in the same change).
 
 ### Hygiene dedupe batch (single entry — take together)
 
@@ -4067,7 +4217,14 @@ fixtures + scaling-skills tutorial. Two findings deferred:
   tests prove parser output, integration tests prove reachability, and the
   current docs don't bridge the two cleanly. Doc-only follow-up.
 
-- [ ] **P1 flake — audit-writer.test.ts week-boundary failure.** Caught
+- [x] **P1 flake — audit-writer.test.ts week-boundary failure.** DONE — both
+  halves of the prescribed move already landed: src half in `ca68633f`
+  (`fileDate` derived from the event's own `ts`, not wall-clock, at
+  `src/core/audit/audit-writer.ts` computeFilename call site) and test half
+  in `0b7efd35` (the hardcoded `2026-05-22` replaced with real `now` + direct
+  week-file writes). The remaining Monday-straddle case works BECAUSE of the
+  src fix (a Sunday `ts` routes to the previous week's file, which
+  readRecent's two-file walk covers). Original filing: Caught
   during ship of v0.41.7.0. Test at `test/audit/audit-writer.test.ts:229`
   ("returns events from current week, filtered by ts cutoff") fails when
   real UTC date is in a different ISO week than the test's hardcoded
@@ -4099,7 +4256,11 @@ follow-ups, captured here so v0.42 starts informed.
   `embedding_coverage`. Requires repro of the original 890K embed failure
   on current code FIRST to confirm whether it's batch-overflow vs
   single-oversized-chunk vs token-estimate-miss. Effort: human ~2 days /
-  CC ~3 hours.
+  CC ~3 hours. SCOPE NARROWED (v0.47.x fix wave): the single-oversized-chunk
+  branch is now healed in place by `src/core/embed-oversize-heal.ts`
+  (split-on-detect, shared by CLI embed + embed --stale), so that case no
+  longer perma-fails a stale sweep; remaining scope is batch-overflow /
+  token-estimate-miss + `TokenLimitError` quarantine.
 
 - [ ] **v0.42 P1 — Source-repo remediation surface.** Codex r1 #7
   caught: cleanup CLI that deletes DB rows doesn't fix source of truth
@@ -4478,7 +4639,8 @@ outside-voice triage on the reshaped plan.
   speedup pass: an in-repo canonical qrels target now exists (`gbrain eval gate`
   with the deterministic embedder option against `test/fixtures/eval-baselines/
   qrels-search.json`; runner `scripts/run-eval-canary.ts`, CI-gated via
-  check:eval-canary, ledger `.gbrain-evals/eval-results.jsonl`). What remains
+  `test/eval-canary.test.ts` in the unit matrix with `check:eval-canary` as
+  the on-demand package script, ledger `.gbrain-evals/eval-results.jsonl`). What remains
   here is only the sibling-repo REGRESSION baseline (.baseline.ndjson for the
   jaccard/top1 gate) — the correctness-gate half is done.
 
@@ -4687,7 +4849,7 @@ contributor traps.
 
 ## v0.41+ master flake follow-ups (filed during v0.40.8.0 ship)
 
-- [ ] **(P3) — Audit other gateway-mutating tests for missing afterAll cleanup.** v0.40.8.0 added `afterAll(() => resetGateway())` to `test/ai/gateway.test.ts` and quarantined `test/ai/header-transport.test.ts` as `.serial.test.ts`. Two other files mutate gateway state without an explicit cleanup hook: `test/ai/rerank.test.ts`, `test/gateway-embed-model-override.test.ts`. They haven't surfaced flakes yet (different test sequences), but they're the same risk class. Add `afterAll(() => resetGateway())` to both for defense-in-depth, or quarantine if they prove racy under future parallelism changes.
+- [x] **(P3) — Audit other gateway-mutating tests for missing afterAll cleanup.** DONE (stale as originally written + swept): the two named files already carry cleanup (`test/ai/rerank.test.ts` afterEach→resetGateway; `test/gateway-embed-model-override.test.ts` beforeEach/afterEach→resetGateway). The one live instance found by a fresh sweep — `test/ambient-recall.test.ts` configuring a keyless gateway with no reset anywhere — gained `afterAll(() => resetGateway())` in the test-infra perf wave.
 ## v0.40.4 adversarial review LOW findings — captured for v0.41+
 
 - [ ] **Codex L1**: `gbrain search stats --days N` underreports for N > 7. audit-writer.ts reads only current + previous ISO week (~14 days). `--days 30` silently shows ~2 weeks of failure events. Fix shape: extend readRecent to walk N/7 weeks dynamically OR cap user input with a clear message.
@@ -4704,7 +4866,7 @@ contributor traps.
 
 ## Pre-existing flake on master (noticed during v0.40.4 ship)
 
-- [ ] **`test/search/embedding-column.test.ts:466,489,522` — `isCacheSafe` returns false when run after gateway-state-mutating siblings in shard 2.** Confirmed pre-existing on master (`git stash` + `SHARD=2/8 bash scripts/run-unit-shard.sh` reproduces 3 fails on a clean working tree). Symptom: `isCacheSafe(default-named-column, empty-cfg)` expects `gwDims=1536` but reads `1280` (the post-v0.37.11.0 ZeroEntropy default). Some test in the shard before embedding-column.test.ts initializes the gateway with the PGLite-default ZeroEntropy/1280 config and leaves it that way. Either: (a) embedding-column.test.ts grows a `beforeEach` that calls `__setEmbedTransportForTests`-style reset, (b) the offending sibling adds an `afterAll(reset)`, or (c) embedding-column.test.ts becomes `*.serial.test.ts` to quarantine. Three test files in shard 2 touch gateway state via PGLite engine connects: `restart-sweep.test.ts`, `init-mode-picker.test.ts`, `doctor.test.ts`. Tests pass in isolation (50/50); only fail under shard-2 ordering. v0.40.4 ships through this flake — not introduced by the wave.
+- [x] **`test/search/embedding-column.test.ts:466,489,522` — `isCacheSafe` returns false when run after gateway-state-mutating siblings in shard 2.** DONE: closed by option (c) — the file was renamed to `test/search/embedding-column.serial.test.ts` in `ca68633f` (v0.41.2.0), giving it its own bun process; entry left open pointed at a filename that no longer exists. If the file is ever un-quarantined, add `beforeEach(() => resetGateway())` (NOT `__unconfigureGatewayForTests` — that falls through to the ZE/1280 defaults; `resetGateway` re-applies the preload's OpenAI/1536 baseline). Original filing: Confirmed pre-existing on master (`git stash` + `SHARD=2/8 bash scripts/run-unit-shard.sh` reproduces 3 fails on a clean working tree). Symptom: `isCacheSafe(default-named-column, empty-cfg)` expects `gwDims=1536` but reads `1280` (the post-v0.37.11.0 ZeroEntropy default). Some test in the shard before embedding-column.test.ts initializes the gateway with the PGLite-default ZeroEntropy/1280 config and leaves it that way. Either: (a) embedding-column.test.ts grows a `beforeEach` that calls `__setEmbedTransportForTests`-style reset, (b) the offending sibling adds an `afterAll(reset)`, or (c) embedding-column.test.ts becomes `*.serial.test.ts` to quarantine. Three test files in shard 2 touch gateway state via PGLite engine connects: `restart-sweep.test.ts`, `init-mode-picker.test.ts`, `doctor.test.ts`. Tests pass in isolation (50/50); only fail under shard-2 ordering. v0.40.4 ships through this flake — not introduced by the wave.
 
 ## v0.40.4 graph signals — deferred follow-ups (v0.41+)
 
