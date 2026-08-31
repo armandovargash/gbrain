@@ -1,6 +1,43 @@
 # TODOS
 
-## Eval write-path fix wave follow-ups (filed 2026-08-31; the five CEO-review-deferred items — wave receipt: gbrain-evals Cat 35 bracketing runs, pre-wave baseline dream 70.2% / quote fidelity 54.2% / emission 16/20 at aa820c7f)
+## Eval retrieval fix wave follow-ups (filed 2026-08-31, second wave; receipts: LongMemEval recall_all@5 rescore 83.40% + Cat 34 openclaw 9-miss itemization at 6bf8db90)
+
+- [ ] **P2 — facts-lane `idea` kind quality gap.** **What:** Cat 35's facts
+  lane scores the `idea` kind at 50.0% salient-unit recall (post-wave receipt
+  `receipt-2026-08-31-v0.47.8.0-wave-079941d2.json`) vs the dream lane's 86.7%
+  and a 100% verbatim ceiling — the largest facts sub-metric gap. **Why:** ideas
+  are the kind users cite back most ("that framing I had last month"). **Where:**
+  `src/core/facts/extract.ts` prompt rule for `idea` (line ~200) + eligibility.
+  **Receipt-gated:** improvements must be generic prompt/coverage work, never
+  tuned on the frozen Cat 35 corpus. **Effort:** M. **Priority:** P2.
+- [ ] **P3 — `retrieval_reflex_max_pointers` / `retrieval_reflex_window_turns`
+  ablation.** **What:** the two real config knobs on the reflex lane have never
+  been swept against BrainBench; the 2026-08 wave closed the openclaw gap via
+  the volunteer arm instead, so the pointer-budget knob's marginal value is now
+  unknown. **Where:** `src/core/context/reflex.ts:81-129`; sweep via
+  `gbrain eval brainbench` at 2/3/4 pointers × 1/4/8 window turns. **Effort:** S.
+- [ ] **P3 — `search.dedup_max_per_page` config key.** **What:** config-plane
+  analog of the per-call `dedupOpts.maxPerPage` (publicized by the LongMemEval
+  `hybrid-diverse` row). Deferred at the 2026-08 CEO review (D3.5): ship only
+  with a Class-1-dominant decomposition receipt; folds into the NEXT
+  KNOBS_HASH bump (v=28), never its own. **Where:** `src/core/search/dedup.ts`
+  + `mode.ts` + `config.ts` registry. **Effort:** S.
+- [ ] **P3 — single-pool volunteer resolve micro-opt.** **What:** Arm 1 + Arm 2
+  currently issue two resolver calls per windowed turn (pointer budget, then
+  wide volunteer pool). One wider resolve split into pointers + gated remainder
+  would halve resolver load. **REJECTED for the 2026-08 wave** (outside-voice
+  F6): the two-call shape is byte-parity with the proven claude-code lane
+  (96/96 at precision 1.0), and a single-pool refactor changes suppression/cap
+  interplay on the exact number being published. Re-attempt only with a
+  brainbench same-hash proof + latency receipt. **Where:**
+  `src/core/context/reflex.ts` + `volunteer.ts:volunteerStage`. **Effort:** M.
+- [ ] **P3 — LoCoMo benchmark lane (gbrain-evals).** **What:** the comparison
+  doc calls LoCoMo "the most interesting unrun benchmark on this page for
+  gbrain specifically" (MemPal 96.3–100% R@10 with rerankers, Memori 81.95%).
+  New lane = its own wave with corpus freeze + pre-registration. **Where:**
+  gbrain-evals `eval/runner/`. **Effort:** L. **Priority:** P3.
+
+## Eval write-path fix wave follow-ups (filed 2026-08-31; the five CEO-review-deferred items — wave receipt: gbrain-evals Cat 35 bracketing runs, pre-wave baseline dream 70.2% / quote fidelity 54.2% / emission 16/20 at aa820c7f. NOTE on ids: this block's E2–E9 ids are scoped to THIS section; an unrelated older "E5" exists under the chennai fix-wave P3 block ("content-level BrainBench leak detection") — cite as "write-path E5" vs "chennai E5" when cross-referencing, per the 2026-08 D3.3 disambiguation)
 
 - [ ] **P3 — E2: chunk-boundary overlap window in splitTranscriptByBudget.**
   **What:** carry ~5% tail overlap between adjacent transcript chunks so salient
@@ -1941,7 +1978,7 @@ explicitly scoped OUT with a one-line rationale — none is a bug, all are addit
 
 - [ ] **Autonomous transcript watchers (D3=B).** The shipped event contract covers session boundaries (start, compaction, heartbeat) but relies on the harness emitting a lifecycle event. A per-harness transcript watcher would drive ambient recall for harnesses that can't emit — but watchers are fragile and compaction is often invisible on disk. Add per harness that proves it can't emit a boundary event. Priority: P3.
 - [ ] **Materialized `thread_state` table.** `delta`'s thread-change arm derives open-thread deltas from facts/timeline `updated_at` scans. If a perf gate ever forces it, materialize a `thread_state` table instead of deriving. Not needed until the derive-path SLO is threatened. Priority: P3.
-- [ ] **Codex native boundary hooks.** Codex has no hooks upstream (`CODEX_HAS_HOOKS=false`), so its ambient path is pull-only (AGENTS.md gate tells it to call `context_pack`/`delta` at boundaries). When Codex ships a hook mechanism, register the boundary events the way the Claude Code lane does; the IPC `context_pack` kind + `--harness codex` attribution channel are already reserved for it. Priority: P3.
+- [ ] **Codex native boundary hooks.** ~~Codex has no hooks upstream (`CODEX_HAS_HOOKS=false`)~~ STALE as of v0.47.9.0 (#4591): `CODEX_HAS_HOOKS=true` and the trust-gated hooks writer shipped (`src/core/bootstrap/codex-hooks.ts`), but SessionEnd (capture) ONLY — the ambient path stays pull-only until a SessionStart/boundary lane lands (see the "codex SessionStart context lane" P3 entry). When that lane registers boundary events the way the Claude Code lane does, the IPC `context_pack` kind + `--harness codex` attribution channel are already reserved for it. Priority: P3. (Staleness fixed by the 2026-08 eval fix wave, D3.3.)
 ## Brain-currency harness-e2e follow-ups (filed with the PR-A wave)
 
 - [ ] **P1 — Extend engine-identity convergence to the other long-lived planes.**
