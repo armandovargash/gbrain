@@ -12,8 +12,23 @@ file, the workflow pins, and the affected assertions together.
   version stamp; CI installs the RELEASE TAG `v2026.8.3` = commit `3c27eb62` — the two
   differ by post-release main commits, same declared version. If a CI door run ever
   diverges from these notes, re-observe against the tag checkout.)
-- Installer sha256: `4b5839eb4f7cf4775108bcda6345a8de7766898ac4b4bbcafb5b0374f65603e3`
-  (refreshed 2026-08-28: upstream drifted again past the 2026-08-25 pin —
+- Installer sha256: `2076946edc23b3aed4a82ccb2e6b38ab593575626206dbdd192384e375b6d57c`
+  (refreshed 2026-08-31: upstream drifted past the 2026-08-28 pin `4b5839eb…`
+  by exactly 4 commits touching `scripts/install.sh` (the served file;
+  matched byte-for-byte against the upstream repo at `a071fc80d`). Full
+  62-line diff reviewed: (1) Node support gate tightens 24.x → 24.11+
+  (version arithmetic only); (2) new `run_locked_uv_sync` helper — re-enables
+  PROJECT `[tool.uv]` config discovery for the Tier-0 locked sync in a
+  subshell while redirecting user/system uv config to an empty XDG dir, so
+  `uv sync --locked` is hash-verified again instead of falling through to
+  the non-hash-verified PyPI tiers (security-positive; the project config it
+  discovers comes from OUR tag+commit-pinned checkout); (3) default SOUL.md
+  prompt text rewrite (cosmetic, no exec). Outbound hosts and curl/wget
+  surfaces byte-identical to the prior pin; all five door flags
+  (`--skip-setup`/`--non-interactive`/`--skip-browser`/`--skip-computer-use`/
+  `--branch`/`--commit`) intact; unknown flags still hard-fail; payload pins
+  (tag+commit) unchanged.)
+  Prior record (2026-08-28 pin `4b5839eb…`, reviewed in full at 3,639 lines —
   reviewed in full, all 3,639 lines: the `--skip-setup`/`--non-interactive`/
   `--branch`/`--commit`/`--force-commit` flags the door depends on are intact
   and unknown flags hard-fail (`exit 1`, so a dropped flag can never silently
