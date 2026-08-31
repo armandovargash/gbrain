@@ -28,9 +28,11 @@
  * (people/patterns) may quote OTHER sources and are skipped, counted.
  *
  * Failure contract (fail-open, pacer precedent — a verify bug never kills the
- * phase): unbalanced quote marks → skip that paragraph's spans + count;
- * page read-back miss → skip page + count; write-back throw → log slug+source,
- * count, continue. Zero LLM calls; pure string ops with soft caps.
+ * phase): unbalanced quote marks → skip that paragraph's spans of that mark
+ * type + count; page read-back miss → skip page + count; write-back throw →
+ * log slug+source, count, continue. Zero LLM calls; pure string ops with hard
+ * probe/size caps so adversarial page or transcript content degrades to
+ * "strip" or "skip", never to unbounded CPU.
  *
  * Write-back reuses the SAME canonical pipeline the children's put_page tool
  * executes — importFromContent (page + tags + chunks + link extraction in one
@@ -57,8 +59,35 @@ const MAX_QUOTES_PER_PAGE = 200;
 /** Near-match acceptance floor (token overlap) and ambiguity margin. */
 const NEAR_MATCH_FLOOR = 0.8;
 const NEAR_MATCH_AMBIGUITY = 0.05;
-/** Soft cap on candidate anchor positions scanned per quote. */
+/** Rung-3 CPU bounds: candidate windows scored, TOTAL trigram indexOf probes
+ * (a long ungroundable quote must not do thousands of full-transcript scans
+ * on the event loop), trigrams considered (stride-sampled above this), and
+ * the largest normalized quote rung 3 will attempt at all — a multi-thousand
+ * char "quote" that isn't exact/normalized is fabricated in practice and
+ * goes straight to strip. */
 const MAX_ANCHOR_CANDIDATES = 50;
+const MAX_ANCHOR_PROBES = 200;
+const MAX_NEAR_TRIGRAMS = 50;
+const MAX_NEAR_QUOTE_NORM_CHARS = 2000;
+/** Near-match window shaping: growth over the quote's normalized length and
+ * fixed char slack on each side (word-boundary snapped after). */
+const WINDOW_GROWTH = 1.2;
+const WINDOW_SLACK_BEFORE = 20;
+const WINDOW_SLACK_AFTER = 40;
+/** F4b soft cap: unique numeric/date claims checked per page (warn-only
+ * telemetry — a bounded sample keeps its signal on numbers-dense pages). */
+const MAX_NUMERIC_CLAIMS_PER_PAGE = 200;
+
+/** Shared code/link masking (offset-preserving): fenced blocks, inline code,
+ * wikilinks, and markdown link targets are replaced with spaces so quote
+ * marks inside them never pair with prose quotes. */
+function maskNonProse(body: string): string {
+  return body
+    .replace(/```[\s\S]*?(?:```|$)/g, m => ' '.repeat(m.length))
+    .replace(/`[^`\n]*`/g, m => ' '.repeat(m.length))
+    .replace(/\[\[[^\]]*\]\]/g, m => ' '.repeat(m.length))
+    .replace(/\]\([^)]*\)/g, m => ' '.repeat(m.length));
+}
 
 export interface QuoteVerifyStats {
   pages_checked: number;
@@ -97,13 +126,19 @@ function emptyStats(): QuoteVerifyStats {
 /**
  * Offset-mapped grounding normalization — the wave's shared primitive (also
  * used by the triage-rescue segment check and, at prompt-build time, by
- * buildTriageMapBlock's quote filter via the plain `norm` form).
+ * buildTriageMapBlock's quote filter via the mapless `normForGrounding`).
  *
  * Folds: whitespace runs → single space, curly quotes/apostrophes → straight,
  * unicode dashes → '-', case → lower. `map[i]` = index in the ORIGINAL string
  * of the character that produced `norm[i]`, so any match in normalized space
  * maps back to a VERBATIM original slice (outside-voice amendment: without
  * the map, "replace with verbatim span" would not be verbatim).
+ *
+ * Invariant: norm.length === map.length ALWAYS — toLowerCase() can expand one
+ * code unit into several (U+0130 'İ' → 'i' + U+0307), so every emitted code
+ * unit records its own source index (security-review fix: a single push per
+ * source char desynced every later offset and could slice garbage — or
+ * nothing — back into a page as a "verbatim" repair).
  */
 export function normalizeForGrounding(s: string): { norm: string; map: number[] } {
   const out: string[] = [];
@@ -123,15 +158,29 @@ export function normalizeForGrounding(s: string): { norm: string; map: number[] 
       map.push(map.length > 0 ? map[map.length - 1] : i);
       pendingSpace = false;
     }
-    out.push(ch.toLowerCase());
-    map.push(i);
+    const low = ch.toLowerCase();
+    for (let k = 0; k < low.length; k++) {
+      out.push(low[k]);
+      map.push(i);
+    }
   }
   return { norm: out.join(''), map };
 }
 
-/** Plain normalized form (no map) — for presence checks. */
+/**
+ * Plain normalized form (no offset map) — for presence checks. Mapless fast
+ * path: native replaces, no per-char array churn (a triage-gate or map-block
+ * check over an MB transcript must not allocate an 8-byte-per-char map it
+ * throws away). Parity with normalizeForGrounding().norm is pinned by test.
+ */
 export function normForGrounding(s: string): string {
-  return normalizeForGrounding(s).norm;
+  return s
+    .replace(/[‘’ʼ]/g, "'")
+    .replace(/[“”]/g, '"')
+    .replace(/[–—−]/g, '-')
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 interface GroundedTranscript {
@@ -148,68 +197,70 @@ export interface TranscriptForVerify {
 
 /**
  * Quote-span extraction from a page BODY (frontmatter already split off).
- * Pairs straight or curly double quotes within a paragraph; skips fenced code
- * blocks, inline code, wikilinks, and markdown link targets. A paragraph with
- * an ODD number of quote marks is unbalanced — its spans are skipped (counted
- * by the caller), never guessed at.
+ * Marks are collected with ABSOLUTE offsets over the masked body (no
+ * paragraph-slice arithmetic — the original split/rejoin approximation
+ * dropped every span after a separator longer than two chars, which let
+ * fabricated quotes escape verification entirely; caught by the ship review's
+ * runtime probe). Pairing is per mark TYPE within each paragraph: straight
+ * `"` pairs sequentially; curly pairs directionally (`“` with the next `”`),
+ * so an interior curly-quoted phrase inside a straight-quoted span no longer
+ * mis-pairs across types. A paragraph with unpairable marks of a type skips
+ * that type's spans there (counted `unbalanced`, never guessed at); spans
+ * nested inside another span are dropped (the outer span is the quote).
  */
 export function extractQuoteSpans(body: string): { spans: Array<{ start: number; end: number; inner: string }>; unbalanced: number } {
   const spans: Array<{ start: number; end: number; inner: string }> = [];
   let unbalanced = 0;
+  const masked = maskNonProse(body);
 
-  // Mask fenced code blocks + inline code + wikilinks + link targets so quote
-  // marks inside them never pair with prose quotes. Masking (not removal)
-  // preserves offsets.
-  const masked = body
-    .replace(/```[\s\S]*?(?:```|$)/g, m => ' '.repeat(m.length))
-    .replace(/`[^`\n]*`/g, m => ' '.repeat(m.length))
-    .replace(/\[\[[^\]]*\]\]/g, m => ' '.repeat(m.length))
-    .replace(/\]\([^)]*\)/g, m => ' '.repeat(m.length));
+  // Exact paragraph ranges via matchAll — offsets never drift.
+  const bounds: Array<{ start: number; end: number }> = [];
+  let cursor = 0;
+  for (const m of masked.matchAll(/\n\s*\n/g)) {
+    bounds.push({ start: cursor, end: m.index ?? 0 });
+    cursor = (m.index ?? 0) + m[0].length;
+  }
+  bounds.push({ start: cursor, end: masked.length });
 
-  // Paragraph-wise pairing keeps an unbalanced paragraph from swallowing the
-  // rest of the document into one bogus span.
-  let paraStart = 0;
-  const paragraphs = masked.split(/\n\s*\n/);
-  for (const para of paragraphs) {
-    const marks: number[] = [];
-    for (let i = 0; i < para.length; i++) {
-      const ch = para[i];
-      if (ch === '"' || ch === '“' || ch === '”') marks.push(paraStart + i);
-    }
-    if (marks.length % 2 !== 0) {
-      unbalanced++;
-    } else {
-      for (let m = 0; m + 1 < marks.length; m += 2) {
-        const start = marks[m];
-        const end = marks[m + 1];
-        const inner = body.slice(start + 1, end);
-        if (inner.length >= MIN_QUOTE_CHARS) spans.push({ start, end, inner });
-        if (spans.length >= MAX_QUOTES_PER_PAGE) break;
+  for (const b of bounds) {
+    const straight: number[] = [];
+    const curlyOpen: number[] = [];
+    const pairs: Array<[number, number]> = [];
+    let paraUnbalanced = false;
+    for (let i = b.start; i < b.end; i++) {
+      const ch = masked[i];
+      if (ch === '"') straight.push(i);
+      else if (ch === '“') curlyOpen.push(i);
+      else if (ch === '”') {
+        const open = curlyOpen.pop();
+        if (open === undefined) paraUnbalanced = true;
+        else pairs.push([open, i]);
       }
     }
-    paraStart += para.length + 2; // rejoin the split "\n\n" (approximate but
-    // consistent: split consumes variable \n\s*\n, so recompute exactly below.
+    if (curlyOpen.length > 0) paraUnbalanced = true;
+    if (straight.length % 2 !== 0) paraUnbalanced = true;
+    else for (let m = 0; m + 1 < straight.length; m += 2) pairs.push([straight[m], straight[m + 1]]);
+    if (paraUnbalanced) unbalanced++;
+
+    for (const [start, end] of pairs) {
+      const inner = body.slice(start + 1, end);
+      if (inner.length >= MIN_QUOTE_CHARS) spans.push({ start, end, inner });
+      if (spans.length >= MAX_QUOTES_PER_PAGE) break;
+    }
     if (spans.length >= MAX_QUOTES_PER_PAGE) break;
   }
 
-  // The paragraph-offset approximation above can drift when the separator is
-  // longer than two chars; re-anchor every span against the real body so a
-  // repair never lands at the wrong offset. Drop any span that fails to
-  // re-anchor (defensive; counts as unbalanced rather than mis-repairing).
-  const anchored: Array<{ start: number; end: number; inner: string }> = [];
+  // Drop spans nested inside another span — the outer span is the quote; a
+  // nested repair would splice inside a region the outer repair replaces.
+  spans.sort((a, b2) => a.start - b2.start);
+  const kept: typeof spans = [];
+  let lastEnd = -1;
   for (const sp of spans) {
-    const probe = body.slice(sp.start, sp.end + 1);
-    if (probe.length === sp.inner.length + 2
-      && (probe[0] === '"' || probe[0] === '“' || probe[0] === '”')
-      && probe.slice(1, -1) === sp.inner) {
-      anchored.push(sp);
-    } else {
-      const idx = body.indexOf(`"${sp.inner}"`);
-      if (idx >= 0) anchored.push({ start: idx, end: idx + sp.inner.length + 1, inner: sp.inner });
-      else unbalanced++;
-    }
+    if (sp.start < lastEnd) continue;
+    kept.push(sp);
+    lastEnd = sp.end;
   }
-  return { spans: anchored, unbalanced };
+  return { spans: kept, unbalanced };
 }
 
 export type GroundResult =
@@ -231,32 +282,40 @@ export function groundQuote(inner: string, t: GroundedTranscript): GroundResult 
   // Rung 2: normalized whole-span match → map back to the original slice.
   const pos = t.norm.indexOf(q.norm);
   if (pos >= 0) {
-    // Ambiguity check: a second occurrence with different original text is
-    // fine (both are verbatim); just take the first.
     const start = t.map[pos];
-    const end = t.map[pos + q.norm.length - 1] + 1;
-    const replacement = t.content.slice(start, end);
+    const endIdx = t.map[pos + q.norm.length - 1];
+    // Defensive: a map hole or empty slice must never become a "verbatim"
+    // repair (the desync class the map invariant now prevents; belt+braces).
+    if (start === undefined || endIdx === undefined) return { status: 'none' };
+    const replacement = t.content.slice(start, endIdx + 1);
+    if (replacement.length === 0) return { status: 'none' };
     return replacement === inner ? { status: 'exact' } : { status: 'normalized', replacement };
   }
 
   // Rung 3: near match. Anchor on word trigrams from the quote; score
   // candidate windows by token overlap; accept a single clear winner ≥ floor.
+  // Hard-bounded: total probes, trigrams (stride-sampled), quote size.
+  if (q.norm.length > MAX_NEAR_QUOTE_NORM_CHARS) return { status: 'none' };
   const qTokens = q.norm.split(' ').filter(w => w.length > 0);
   if (qTokens.length < 4) return { status: 'none' };
+  const triCount = qTokens.length - 2;
+  const stride = Math.max(1, Math.ceil(triCount / MAX_NEAR_TRIGRAMS));
   const candidates: Array<{ start: number; end: number; score: number }> = [];
   const seenStarts = new Set<number>();
-  for (let g = 0; g + 2 < qTokens.length && candidates.length < MAX_ANCHOR_CANDIDATES; g++) {
+  let probes = 0;
+  for (let g = 0; g + 2 < qTokens.length && candidates.length < MAX_ANCHOR_CANDIDATES && probes < MAX_ANCHOR_PROBES; g += stride) {
     const gram = qTokens.slice(g, g + 3).join(' ');
     let from = 0;
-    while (candidates.length < MAX_ANCHOR_CANDIDATES) {
+    while (candidates.length < MAX_ANCHOR_CANDIDATES && probes < MAX_ANCHOR_PROBES) {
+      probes++;
       const at = t.norm.indexOf(gram, from);
       if (at < 0) break;
       from = at + 1;
       // Window: extend around the anchor to the quote's normalized length
-      // ±20%, snapped to word boundaries in normalized space.
+      // (WINDOW_GROWTH) + fixed slack, snapped to word boundaries.
       const targetLen = q.norm.length;
-      let winStart = Math.max(0, at - Math.floor(g / Math.max(1, qTokens.length) * targetLen) - 20);
-      let winEnd = Math.min(t.norm.length, winStart + Math.ceil(targetLen * 1.2) + 40);
+      let winStart = Math.max(0, at - Math.floor(g / Math.max(1, qTokens.length) * targetLen) - WINDOW_SLACK_BEFORE);
+      let winEnd = Math.min(t.norm.length, winStart + Math.ceil(targetLen * WINDOW_GROWTH) + WINDOW_SLACK_AFTER);
       while (winStart > 0 && t.norm[winStart] !== ' ') winStart--;
       while (winEnd < t.norm.length && t.norm[winEnd] !== ' ') winEnd++;
       if (seenStarts.has(winStart)) continue;
@@ -281,12 +340,10 @@ export function groundQuote(inner: string, t: GroundedTranscript): GroundResult 
     // span (ambiguity falls through to strip).
     return { status: 'none' };
   }
-  // Map the window back to a verbatim original slice, trimmed of the window's
-  // slack: shrink to the tightest run whose tokens still clear the floor is
-  // overkill — the ±20% window with word-boundary snap reads naturally.
   const oStart = t.map[best.start];
-  const oEnd = t.map[Math.max(best.start, best.end - 1)] + 1;
-  const replacement = t.content.slice(oStart, oEnd).trim();
+  const oEndIdx = t.map[Math.max(best.start, best.end - 1)];
+  if (oStart === undefined || oEndIdx === undefined) return { status: 'none' };
+  const replacement = t.content.slice(oStart, oEndIdx + 1).trim();
   if (replacement.length === 0) return { status: 'none' };
   return { status: 'near', replacement };
 }
@@ -295,7 +352,9 @@ export function groundQuote(inner: string, t: GroundedTranscript): GroundResult 
  * F4b (warn-only): count numeric/date claims in the body that do not ground
  * in the transcript. Currency, percents, 4+ digit numbers, ISO dates, and
  * month-name dates. No repair, no LLM — telemetry a future grounding gate
- * (filed TODO E7) can act on.
+ * (filed TODO E7) can act on. Bounded: first MAX_NUMERIC_CLAIMS_PER_PAGE
+ * unique claims (a numbers-dense table must not scan the transcript
+ * thousands of times for warn-only telemetry).
  */
 export function countUngroundedNumericClaims(body: string, t: GroundedTranscript): number {
   const masked = body.replace(/```[\s\S]*?(?:```|$)/g, ' ').replace(/`[^`\n]*`/g, ' ');
@@ -303,10 +362,10 @@ export function countUngroundedNumericClaims(body: string, t: GroundedTranscript
   let warns = 0;
   const seen = new Set<string>();
   for (const m of masked.match(claimRe) ?? []) {
+    if (seen.size >= MAX_NUMERIC_CLAIMS_PER_PAGE) break;
     const claim = normForGrounding(m);
     if (claim.length === 0 || seen.has(claim)) continue;
     seen.add(claim);
-    // Years alone ground too easily / noisily; still checked, cheap.
     if (!t.norm.includes(claim)) warns++;
   }
   return warns;
@@ -358,7 +417,10 @@ export function repairBody(body: string, t: GroundedTranscript): {
 /**
  * Orchestrator entry: verify/repair every newly-created page from this
  * phase's writtenRefs. `transcriptsByPath` maps a transcript filePath →
- * its full content + hash6 (the slug-binding suffix).
+ * its full content + hash6 (the slug-binding suffix). Refs are grouped by
+ * transcript so each GroundedTranscript (content + norm + offset map, ~10x
+ * the transcript's bytes) is built once and released before the next —
+ * resident overhead is bounded to ONE transcript regardless of phase size.
  */
 export async function verifyAndRepairDreamPages(
   engine: BrainEngine,
@@ -367,16 +429,13 @@ export async function verifyAndRepairDreamPages(
   opts: { signal?: AbortSignal } = {},
 ): Promise<QuoteVerifyStats> {
   const stats = emptyStats();
-  const groundedCache = new Map<string, GroundedTranscript>();
-  // Dedupe defensively by (source, slug) — collectChildPutPageSlugs already
-  // dedupes slugs, but the contract lives here too.
+  // Dedupe defensively by (source, slug) and group by transcript.
   const seen = new Set<string>();
+  const byTranscript = new Map<string, Array<{ slug: string; source_id: string }>>();
   for (const ref of refs) {
-    const key = `${ref.source_id} ${ref.slug}`;
+    const key = `${ref.source_id} ${ref.slug}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    throwIfAborted(opts.signal, '[dream] quote verify');
-
     const t = ref.raw_source ? transcriptsByPath.get(ref.raw_source) : undefined;
     if (!t) { stats.skipped_no_transcript++; continue; }
     // Scope: only pages this transcript CREATED — the slug carries the
@@ -384,48 +443,60 @@ export async function verifyAndRepairDreamPages(
     // pre-existing page (people/patterns) may quote OTHER sources; whole-page
     // verification against one transcript would strip their valid quotes.
     if (!ref.slug.includes(`-${t.hash6}`)) { stats.skipped_preexisting++; continue; }
+    const group = byTranscript.get(ref.raw_source as string);
+    if (group) group.push({ slug: ref.slug, source_id: ref.source_id });
+    else byTranscript.set(ref.raw_source as string, [{ slug: ref.slug, source_id: ref.source_id }]);
+  }
 
-    let grounded = groundedCache.get(ref.raw_source as string);
-    if (!grounded) {
-      const { norm, map } = normalizeForGrounding(t.content);
-      grounded = { content: t.content, norm, map };
-      groundedCache.set(ref.raw_source as string, grounded);
-    }
+  for (const [rawSource, group] of byTranscript) {
+    throwIfAborted(opts.signal, '[dream] quote verify');
+    const t = transcriptsByPath.get(rawSource)!;
+    const { norm, map } = normalizeForGrounding(t.content);
+    const grounded: GroundedTranscript = { content: t.content, norm, map };
 
-    try {
-      const page = await engine.getPage(ref.slug, { sourceId: ref.source_id });
-      if (!page) { stats.errors++; continue; }
-      stats.pages_checked++;
-      const tags = await engine.getTags(ref.slug, { sourceId: ref.source_id });
-      const md = serializePageToMarkdown(page, tags);
-      const { fm, body } = splitFrontmatter(md);
-      const r = repairBody(body, grounded);
-      stats.quotes_total += r.quotes;
-      stats.exact += r.exact;
-      stats.normalized_fixed += r.normalized;
-      stats.near_fixed += r.near;
-      stats.stripped += r.stripped;
-      stats.unbalanced += r.unbalanced;
-      stats.numeric_claim_warns += countUngroundedNumericClaims(r.body, grounded);
-      if (r.changed) {
-        // Canonical write pipeline — same as the children's put_page tool:
-        // page + tags + chunks + link extraction, content_hash recomputed.
-        // noEmbed: the phase-end embed sweep backfills (oneshot deferEmbeds
-        // parity). Provenance fields null → engine COALESCE keeps the
-        // first-write record intact.
-        await importFromContent(engine, ref.slug, fm + r.body, {
-          noEmbed: true,
-          remote: false,
-          sourceId: ref.source_id,
-        });
-        stats.pages_repaired++;
+    for (const ref of group) {
+      throwIfAborted(opts.signal, '[dream] quote verify');
+      try {
+        const page = await engine.getPage(ref.slug, { sourceId: ref.source_id });
+        if (!page) { stats.errors++; continue; }
+        stats.pages_checked++;
+        const tags = await engine.getTags(ref.slug, { sourceId: ref.source_id });
+        const md = serializePageToMarkdown(page, tags);
+        const { fm, body } = splitFrontmatter(md);
+        const r = repairBody(body, grounded);
+        stats.quotes_total += r.quotes;
+        stats.exact += r.exact;
+        stats.normalized_fixed += r.normalized;
+        stats.near_fixed += r.near;
+        stats.stripped += r.stripped;
+        stats.unbalanced += r.unbalanced;
+        stats.numeric_claim_warns += countUngroundedNumericClaims(r.body, grounded);
+        if (r.changed) {
+          // Canonical write pipeline — same as the children's put_page tool:
+          // page + tags + chunks + link extraction, content_hash recomputed.
+          // noEmbed: the phase-end embed sweep backfills (oneshot deferEmbeds
+          // parity). Provenance fields null → engine COALESCE keeps the
+          // first-write record intact.
+          await importFromContent(engine, ref.slug, fm + r.body, {
+            noEmbed: true,
+            remote: false,
+            sourceId: ref.source_id,
+          });
+          stats.pages_repaired++;
+        }
+      } catch (e) {
+        // Fail-open: a verify bug never kills the phase (pacer precedent) —
+        // but a cooperative abort must still unwind.
+        throwIfAborted(opts.signal, '[dream] quote verify');
+        stats.errors++;
+        const msg = e instanceof Error ? e.message : String(e);
+        process.stderr.write(`[dream] quote verify ${ref.slug}@${ref.source_id} failed: ${msg}\n`);
       }
-    } catch (e) {
-      // Fail-open: a verify bug never kills the phase (pacer precedent).
-      stats.errors++;
-      const msg = e instanceof Error ? e.message : String(e);
-      process.stderr.write(`[dream] quote verify ${ref.slug}@${ref.source_id} failed: ${msg}\n`);
+      // Cooperative yield per page: the string passes are synchronous CPU;
+      // the drain's lock heartbeats need the loop to breathe on big phases.
+      await new Promise(resolve => setTimeout(resolve, 0));
     }
+    // grounded (norm + map) goes out of scope here — one transcript resident.
   }
   return stats;
 }

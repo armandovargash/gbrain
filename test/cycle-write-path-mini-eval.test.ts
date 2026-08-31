@@ -257,4 +257,55 @@ describe('F-Eval: hermetic write-path mini-eval (real phase, scripted transport)
       expect(details.synthesis.children_zero_pages).toBe(0);
     }
   }, 120_000);
+
+  test('kill switch: quote_verify=false leaves fabricated quotes intact and reports quote_verify null; a declining child counts in children_zero_pages', async () => {
+    const brainDir2 = mkdtempSync(join(tmpdir(), 'gbrain-minieval-brain2-'));
+    const corpusDir2 = mkdtempSync(join(tmpdir(), 'gbrain-minieval-corpus2-'));
+    try {
+      const scaffold = 'people/alice-example';
+      await importFromContent(engine, scaffold, '---\ntype: person\n---\nAlice Example, a founder.', { noEmbed: true, remote: false, sourceId: 'default' });
+      await engine.setConfig('dream.synthesize.session_corpus_dir', corpusDir2);
+      await engine.setConfig('dream.synthesize.quote_verify', 'false');   // the incident escape hatch
+      await engine.setConfig('dream.synthesize.last_completion_ts', '');
+      // One signal transcript (child writes, quotes unrepaired) + one that the
+      // child DECLINES (task D) despite passing the gate — the rule-D case.
+      // Distinct content from test 1 (different content hash → fresh
+      // idempotency keys, fresh slugs — no cross-test page reuse).
+      const high = { ...FIXTURES[0], basename: '2026-08-31-killswitch-writer.txt', content: `KILLSWITCH RUN.\n${FIXTURES[0].content}` };
+      writeFileSync(join(corpusDir2, high.basename), high.content);
+      const decliner = { basename: '2026-08-31-decliner.txt', content: `DECLINER RUN.\n${FIXTURES[0].content}` };
+      writeFileSync(join(corpusDir2, decliner.basename), decliner.content);
+
+      __setChatTransportForTests(async (opts) => {
+        const system = opts.system ?? '';
+        const userMsg = String(opts.messages?.[0]?.content ?? '');
+        const isDecliner = userMsg.includes('decliner');
+        let text: string;
+        if (system.startsWith('You triage a conversation transcript')) {
+          text = JSON.stringify({ score: 0.85, content_type: 'reflection', segments: [{ quote: high.segments[0], note: 's' }], entities: [], reasons: ['high'] });
+        } else if (isDecliner) {
+          text = JSON.stringify({ pages: [], skipped: true, skip_reason: 'still routine' });
+        } else {
+          const hash = /hash suffix \(USE THIS in slugs\): ([a-z0-9-]+)/i.exec(userMsg)?.[1] ?? 'nohash';
+          text = JSON.stringify({ pages: [{ slug: `wiki/personal/reflections/2026-08-30-killswitch-${hash}`, title: 'T', type: 'note', body: `Body. See [[${scaffold}]].\n\nAlleged: "${FABRICATED}"` }], skipped: false, skip_reason: null });
+        }
+        return { text, blocks: [{ type: 'text', text } as never], stopReason: 'end', usage: { input_tokens: 100, output_tokens: 20, cache_read_tokens: 0, cache_creation_tokens: 0 }, model: 'anthropic:scripted', providerId: 'anthropic' };
+      });
+
+      const result = await withEnv({ ANTHROPIC_API_KEY: 'sk-test-mini-eval' }, () =>
+        runPhaseSynthesize(engine, { brainDir: brainDir2, dryRun: false }));
+      expect(result.status).toBe('ok');
+      const d = result.details as { written_slugs: string[]; synthesis: { quote_verify: unknown; children_zero_pages: number } };
+      expect(d.synthesis.quote_verify).toBeNull();               // pass skipped entirely
+      expect(d.synthesis.children_zero_pages).toBe(1);           // rule-D decliner counted
+      const killSlug = d.written_slugs.find(s => s.includes('killswitch'));
+      expect(killSlug).toBeDefined();
+      const page = await engine.getPage(killSlug!, { sourceId: 'default' });
+      expect(`${page?.compiled_truth ?? ''}`).toContain(`"${FABRICATED}"`); // unrepaired, marks intact
+    } finally {
+      await engine.setConfig('dream.synthesize.quote_verify', 'true');
+      try { rmSync(brainDir2, { recursive: true, force: true }); } catch { /* */ }
+      try { rmSync(corpusDir2, { recursive: true, force: true }); } catch { /* */ }
+    }
+  }, 120_000);
 });

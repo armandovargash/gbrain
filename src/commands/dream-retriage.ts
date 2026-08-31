@@ -51,7 +51,7 @@ import {
   type TriageFileReport,
 } from '../core/cycle/synthesize.ts';
 import { discoverTranscripts } from '../core/cycle/transcript-discovery.ts';
-import { passesTriageGate } from '../core/cycle/triage-rescue.ts';
+import { passesTriageGate, rescueConfigOf } from '../core/cycle/triage-rescue.ts';
 import { setCliExitVerdict } from '../core/cli-force-exit.ts';
 import { MinionQueue } from '../core/minions/queue.ts';
 import { canonicalLookup } from '../core/model-pricing.ts';
@@ -221,6 +221,9 @@ interface ReconcileStats {
   candidates: number;
   cancelled: number;
   converted_for_resubmit: number;
+  /** Kept because the job PASSES THE GATE — score >= threshold OR the F2
+   * verified-segment rescue. The name predates the rescue; renaming would
+   * break --json consumers, so the widened semantics live here. */
   kept_above_threshold: number;
   kept_unscored: number;
   /** Rows in a dream-inline-* queue younger than the liveness grace — possibly a running cycle's; never cancelled (CX1). */
@@ -283,11 +286,7 @@ export async function runDreamRetriage(engine: BrainEngine | null, args: string[
   // F2: ONE gate everywhere — the same verified-segment rescue the synthesize
   // fan-out applies. An operator sweep must never cancel queued jobs the
   // rescue admitted (reconcile below), nor audit rescued files as "rejects".
-  const rescueCfg = {
-    floor: config.triage.rescueFloor,
-    minSegments: config.triage.rescueMinSegments,
-    contentTypes: config.triage.rescueContentTypes,
-  };
+  const rescueCfg = rescueConfigOf(config.triage);
 
   let transcripts = discoverTranscripts({
     corpusDir: config.corpusDir,

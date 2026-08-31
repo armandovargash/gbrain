@@ -664,6 +664,49 @@ describe('dream retriage — reconcile matrix', () => {
     }
   }, 30_000);
 
+  test('F2 regression: --audit-rejects samples only NON-rescued rejects (rescued band files are accepted, not rejects)', async () => {
+    const rig = await setupRig();
+    try {
+      const { __setChatTransportForTests, resetGateway } = await import('../src/core/ai/gateway.ts');
+      const rescued = writeTranscript(rig.corpusDir, '2026-08-25-rescued.txt');
+      const plain = writeTranscript(rig.corpusDir, '2026-08-26-plain-reject.txt');
+      const n = '2026-08-25-rescued.txt';
+      await rig.engine.putDreamVerdict(rescued.filePath, rescued.hash, {
+        worth_processing: false,
+        reasons: ['seed'],
+        score: 0.35,
+        content_type: 'mixed',
+        segments: [
+          { quote: `conversation in ${n}\nconversation in ${n}` },
+          { quote: `in ${n} conversation in ${n} conversation` },
+        ],
+        entities: [],
+        model: TIER_DEFAULTS.utility,
+        triage_version: TRIAGE_VERSION,
+      });
+      await seedScore(rig, plain.filePath, plain.hash, 0.35); // same band, no segments → true reject
+      __setChatTransportForTests(async () => ({
+        text: '{"score": 0.9, "content_type": "idea", "segments": [], "entities": [], "reasons": ["frontier disagrees"]}',
+        blocks: [],
+        stopReason: 'end',
+        usage: { input_tokens: 10, output_tokens: 50, cache_read_tokens: 0, cache_creation_tokens: 0 },
+        model: 'test:stub',
+        providerId: 'test',
+      }));
+      try {
+        const { out } = await captureStdout(() => withEnv({ ANTHROPIC_API_KEY: 'sk-test-audit' }, () =>
+          runDreamRetriage(rig.engine, ['--audit-rejects', '5', '--yes', '--json'])));
+        const summary = JSON.parse(out) as { audit: { sampled: number } };
+        expect(summary.audit.sampled).toBe(1); // the plain reject only — never the rescued file
+      } finally {
+        __setChatTransportForTests(null);
+        resetGateway();
+      }
+    } finally {
+      await rig.cleanup();
+    }
+  }, 30_000);
+
   test('--audit-rejects under --dry-run is a loud no-op (audit null, notice printed)', async () => {
     const rig = await setupRig();
     try {

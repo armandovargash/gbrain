@@ -81,10 +81,9 @@ import type { Page, PageType } from '../types.ts';
 import { validateSourceId } from '../utils.ts';
 import { safeSplitIndex } from '../text-safe.ts';
 import { PAGE_SLUG_SEG } from '../cjk.ts';
-import { withChatPhase } from '../ai/chat-usage.ts';
-import { canonicalLookup } from '../model-pricing.ts';
+import { withChatPhase, estimateChatCostUsd } from '../ai/chat-usage.ts';
 import { verifyAndRepairDreamPages, normForGrounding, type QuoteVerifyStats, type TranscriptForVerify } from './synthesize-verify.ts';
-import { passesTriageGate, DEFAULT_RESCUE_FLOOR, DEFAULT_RESCUE_MIN_SEGMENTS, DEFAULT_RESCUE_CONTENT_TYPES, DEFAULT_RESCUE_CONFIG, type RescueConfig } from './triage-rescue.ts';
+import { passesTriageGate, rescueConfigOf, DEFAULT_RESCUE_FLOOR, DEFAULT_RESCUE_MIN_SEGMENTS, DEFAULT_RESCUE_CONTENT_TYPES, DEFAULT_RESCUE_CONFIG, type RescueConfig, type RescueVerdictLike } from './triage-rescue.ts';
 
 // Slug grammar from validatePageSlug — shared via PAGE_SLUG_SEG (#738).
 // Used for the orchestrator-written summary index slug. `u` flag required
@@ -492,11 +491,7 @@ async function runPhaseSynthesizeInner(
       concurrency: config.triage.concurrency,
       maxMs: config.triage.maxMs,
       signal: opts.signal,
-      rescue: {
-        floor: config.triage.rescueFloor,
-        minSegments: config.triage.rescueMinSegments,
-        contentTypes: config.triage.rescueContentTypes,
-      },
+      rescue: rescueConfigOf(config.triage),
     }, opts.yieldDuringPhase);
     const verdicts = pass.reports;
 
@@ -2139,19 +2134,18 @@ export function dreamInlineQueueAgeMs(queueName: string, nowMs = Date.now()): nu
 }
 
 /**
- * F6: price a chat call from the canonical table. Returns null when the model
- * has no canonical pricing — never a fake 0 (house rule, chat-usage.ts).
- * cache_read falls back to the input rate when the provider's cache pricing
- * is unverified (conservative over-estimate, same fallback chat-usage uses).
+ * F6: price a chat call. Thin rounding wrapper over the ONE pricing routine
+ * (chat-usage.ts estimateChatCostUsd — canonical table, cache_read falls
+ * back to the input rate). Returns null when the model has no canonical
+ * pricing — never a fake 0 (house rule).
  */
 function priceChatUsd(model: string, tokens: { in: number; out: number; cacheRead?: number }): number | null {
-  const p = canonicalLookup(model);
-  if (!p) return null;
-  const cacheRead = tokens.cacheRead ?? 0;
-  const usd = (tokens.in / 1e6) * p.input
-    + (tokens.out / 1e6) * p.output
-    + (cacheRead / 1e6) * (p.cache_read ?? p.input);
-  return Math.round(usd * 1e6) / 1e6;
+  const usd = estimateChatCostUsd(model, {
+    input_tokens: tokens.in,
+    output_tokens: tokens.out,
+    cache_read_tokens: tokens.cacheRead ?? 0,
+  });
+  return usd === null ? null : Math.round(usd * 1e6) / 1e6;
 }
 
 export interface TriagePassCfg {
@@ -2291,7 +2285,7 @@ export async function runTriagePass(
   // below_threshold count, dry-run output, the fan-out, and retriage all read
   // one decision.
   const rescueCfg = cfg.rescue ?? DEFAULT_RESCUE_CONFIG;
-  const gate = (v: { score: number | null; content_type: string | null; segments?: ReadonlyArray<{ quote: string }> | null }, content: string) =>
+  const gate = (v: RescueVerdictLike, content: string) =>
     passesTriageGate(v, content, cfg.threshold, rescueCfg);
 
   const processOne = async (idx: number): Promise<void> => {
@@ -3090,4 +3084,5 @@ export const __testing = {
   runSubagentsInline,
   loadSynthConfig,
   writeSummaryPage,
+  priceChatUsd,
 };

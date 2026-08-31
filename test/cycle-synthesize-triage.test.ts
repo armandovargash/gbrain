@@ -229,6 +229,40 @@ describe('runTriagePass — F2 verified-segment rescue at report construction', 
     expect(r.reports[0].worth).toBe(false);
   });
 
+  test('F6 regression: a degenerate (unparseable) judge response still contributes tokens — the call was paid', async () => {
+    const { engine } = makeFakeEngine();
+    const t = makeTranscript('degenerate-paid');
+    const judge: JudgeClient = {
+      create: async () => ({
+        content: [{ type: 'text', text: 'not json at all' }],
+        stop_reason: 'end_turn',
+        usage: { input_tokens: 1234, output_tokens: 56 },
+      } as never),
+    };
+    const r = await runTriagePass(engine, [t], baseCfg(judge));
+    expect(r.unreliable).toBe(1);
+    expect(r.tokens).toEqual({ in: 1234, out: 56 });
+  });
+
+  test('F6 regression: priceChatUsd is null for unpriced models, non-null rounded for priced (never a fake 0)', async () => {
+    const { __testing } = await import('../src/core/cycle/synthesize.ts');
+    expect(__testing.priceChatUsd('totally-unknown:model-x', { in: 1000, out: 1000 })).toBeNull();
+    const priced = __testing.priceChatUsd('anthropic:claude-haiku-4-5-20251001', { in: 1_000_000, out: 0 });
+    expect(priced).not.toBeNull();
+    expect(priced!).toBeGreaterThan(0);
+  });
+
+  test('buildTriageMapBlock: case/curly-punctuation drift in a judge quote still verifies (shared normalizer)', () => {
+    const chunk = 'The user said “We charge for durability, not storage” and moved on.';
+    const block = buildTriageMapBlock({
+      score: 0.8,
+      content_type: 'idea',
+      segments: [{ quote: 'we charge for durability, not storage' }],
+      entities: [],
+    } as never, chunk, 1);
+    expect(block).toContain('we charge for durability, not storage');
+  });
+
   test('a rescued report is NOT below_threshold (the one-gate consistency the retriage sweep reads)', async () => {
     const fake = makeFakeEngine();
     seedVerdict(fake.rows, BURIED, { score: 0.35, content_type: 'mixed', segments: SEGMENTS });

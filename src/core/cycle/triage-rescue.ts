@@ -66,6 +66,19 @@ export const DEFAULT_RESCUE_CONFIG: RescueConfig = {
   contentTypes: DEFAULT_RESCUE_CONTENT_TYPES,
 };
 
+/**
+ * Assemble a RescueConfig from the flat SynthTriageConfig knobs — the ONE
+ * place the three fields map, so a consumer can't forget one and silently
+ * fall back to defaults (the config-side counterpart of the one-gate rule).
+ */
+export function rescueConfigOf(triage: { rescueFloor: number; rescueMinSegments: number; rescueContentTypes: readonly string[] }): RescueConfig {
+  return {
+    floor: triage.rescueFloor,
+    minSegments: triage.rescueMinSegments,
+    contentTypes: triage.rescueContentTypes,
+  };
+}
+
 /** The verdict fields the gate reads — satisfied by DreamVerdict rows and
  * fresh TriageResult objects alike. */
 export interface RescueVerdictLike {
