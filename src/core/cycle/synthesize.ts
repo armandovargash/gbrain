@@ -76,7 +76,8 @@ import { safeSplitIndex } from '../text-safe.ts';
 import { PAGE_SLUG_SEG } from '../cjk.ts';
 import { withChatPhase } from '../ai/chat-usage.ts';
 import { canonicalLookup } from '../model-pricing.ts';
-import { verifyAndRepairDreamPages, type QuoteVerifyStats, type TranscriptForVerify } from './synthesize-verify.ts';
+import { verifyAndRepairDreamPages, normForGrounding, type QuoteVerifyStats, type TranscriptForVerify } from './synthesize-verify.ts';
+import { passesTriageGate, DEFAULT_RESCUE_FLOOR, DEFAULT_RESCUE_MIN_SEGMENTS, DEFAULT_RESCUE_CONTENT_TYPES, DEFAULT_RESCUE_CONFIG, type RescueConfig } from './triage-rescue.ts';
 
 // Slug grammar from validatePageSlug — shared via PAGE_SLUG_SEG (#738).
 // Used for the orchestrator-written summary index slug. `u` flag required
@@ -478,15 +479,21 @@ async function runPhaseSynthesizeInner(
       concurrency: config.triage.concurrency,
       maxMs: config.triage.maxMs,
       signal: opts.signal,
+      rescue: {
+        floor: config.triage.rescueFloor,
+        minSegments: config.triage.rescueMinSegments,
+        contentTypes: config.triage.rescueContentTypes,
+      },
     }, opts.yieldDuringPhase);
     const verdicts = pass.reports;
 
-    // Read-time gate: retuning dream.triage.threshold re-gates instantly with
-    // zero re-judging (scores persist; the dial is applied here).
-    const worthProcessing = transcripts.filter(t => {
-      const v = pass.byPath.get(t.filePath);
-      return v !== undefined && v.score !== null && v.score >= config.triage.threshold;
-    });
+    // Read-time gate: retuning dream.triage.threshold (or the rescue knobs)
+    // re-gates instantly with zero re-judging — scores + segments persist in
+    // dream_verdicts; the dial is applied at report construction inside
+    // runTriagePass (F2: `worth` = threshold pass OR verified-segment rescue,
+    // ONE decision for the fan-out, telemetry, dry-run, and retriage).
+    const reportByPath = new Map(pass.reports.map(r => [r.filePath, r]));
+    const worthProcessing = transcripts.filter(t => reportByPath.get(t.filePath)?.worth === true);
 
     // Count semantics (outside-voice CX7): below_threshold counts ONLY files
     // with a real score under the gate; degraded = no usable score and not
@@ -509,6 +516,13 @@ async function runPhaseSynthesizeInner(
       tokens_in: pass.tokens.in,
       tokens_out: pass.tokens.out,
       cost_usd: priceChatUsd(config.triage.model, { in: pass.tokens.in, out: pass.tokens.out }),
+      // F2 rescue observability: checked = reports whose score landed in the
+      // band (rescue evaluated); fired = passes that came from the rescue.
+      rescue_band: [config.triage.rescueFloor, config.triage.threshold],
+      rescue_checked: pass.reports.filter(
+        r => r.score !== null && r.score < config.triage.threshold && r.score >= config.triage.rescueFloor,
+      ).length,
+      rescue_fired: pass.reports.filter(r => r.rescued === true).length,
     };
     // 3A: a time-boxed cold pass must never read as mass rejection.
     const deferralSuffix = pass.deferred > 0
@@ -1309,6 +1323,12 @@ export interface SynthTriageConfig {
   maxMs: number;
   /** Concurrent judge calls (dream.triage.concurrency, default 4, clamped [1,16]). */
   concurrency: number;
+  /** F2 rescue band floor (dream.triage.rescue_floor, default 0.30, clamped [0,1]). */
+  rescueFloor: number;
+  /** F2 verified-segment minimum (dream.triage.rescue_min_segments, default 2; 0 = rescue OFF). */
+  rescueMinSegments: number;
+  /** F2 content_type allowlist (dream.triage.rescue_content_types CSV, lowercased). */
+  rescueContentTypes: readonly string[];
 }
 
 export interface SynthConfig {
@@ -1488,6 +1508,17 @@ export async function loadSynthConfig(engine: BrainEngine): Promise<SynthConfig>
   const triageMaxMs = Math.max(0, await getNumberConfig(engine, 'dream.triage.max_ms', DEFAULT_TRIAGE_MAX_MS));
   const triageConcurrency = Math.max(1, Math.min(16,
     Math.floor(await getNumberConfig(engine, 'dream.triage.concurrency', DEFAULT_TRIAGE_CONCURRENCY)) || 1));
+  // F2 rescue knobs. A floor above the threshold makes the band empty — a
+  // harmless no-op, so no cross-clamp against the threshold is needed.
+  // getNumberConfig honors 0 (rescue_min_segments 0 = kill switch).
+  const rescueFloor = Math.min(1, Math.max(0,
+    await getNumberConfig(engine, 'dream.triage.rescue_floor', DEFAULT_RESCUE_FLOOR)));
+  const rescueMinSegments = Math.max(0,
+    Math.floor(await getNumberConfig(engine, 'dream.triage.rescue_min_segments', DEFAULT_RESCUE_MIN_SEGMENTS)));
+  const rescueContentTypesRaw = (await engine.getConfig('dream.triage.rescue_content_types'))?.trim();
+  const rescueContentTypes = rescueContentTypesRaw
+    ? rescueContentTypesRaw.split(',').map(s => s.trim().toLowerCase()).filter(s => s.length > 0)
+    : DEFAULT_RESCUE_CONTENT_TYPES;
   const maxTurns = Math.max(1, Math.floor(await getNumberConfig(engine, 'dream.synthesize.max_turns', DEFAULT_MAX_TURNS)) || 1);
   const maxSubmissionsPerSourcePerDay = Math.max(0,
     Math.floor(await getNumberConfig(engine, 'dream.synthesize.max_submissions_per_source_per_day', 0)));
@@ -1569,6 +1600,9 @@ export async function loadSynthConfig(engine: BrainEngine): Promise<SynthConfig>
       maxTokens: triageMaxTokens,
       maxMs: triageMaxMs,
       concurrency: triageConcurrency,
+      rescueFloor,
+      rescueMinSegments,
+      rescueContentTypes,
     },
     maxTurns,
     maxSubmissionsPerSourcePerDay,
@@ -2127,12 +2161,26 @@ export interface TriagePassCfg {
   now?: () => number;
   /** Retriage --max-usd: called after each judged file; return true to stop pulling new misses. */
   shouldStop?: () => boolean;
+  /**
+   * F2 verified-segment rescue config. Defaults to DEFAULT_RESCUE_CONFIG so
+   * every caller gets ONE gate semantics; pass the resolved config knobs from
+   * loadSynthConfig where available. minSegments 0 disables the band.
+   */
+  rescue?: RescueConfig;
 }
 
 export interface TriageFileReport {
   filePath: string;
-  /** Passed the read-time gate (`score >= cfg.threshold`). False for degraded/deferred. */
+  /**
+   * Passed the read-time gate — `score >= cfg.threshold` OR the F2
+   * verified-segment rescue (passesTriageGate is the ONE decision every
+   * consumer reads). False for degraded/deferred.
+   */
   worth: boolean;
+  /** F2: set (true) only when `worth` came from the rescue band. */
+  rescued?: boolean;
+  /** F2: verified substantive segments counted when the band was evaluated. */
+  verified_segments?: number;
   score: number | null;
   content_type: string | null;
   reasons: string[];
@@ -2221,8 +2269,13 @@ export async function runTriagePass(
   const budgetExhausted = (): boolean =>
     stopped || (cfg.maxMs > 0 && now() - start > cfg.maxMs);
 
-  const gateWorth = (score: number | null): boolean =>
-    score !== null && score >= cfg.threshold;
+  // F2: THE gate — threshold pass or verified-segment rescue. Applied here at
+  // report construction (not recomputed downstream) so `worth`, the
+  // below_threshold count, dry-run output, the fan-out, and retriage all read
+  // one decision.
+  const rescueCfg = cfg.rescue ?? DEFAULT_RESCUE_CONFIG;
+  const gate = (v: { score: number | null; content_type: string | null; segments?: ReadonlyArray<{ quote: string }> | null }, content: string) =>
+    passesTriageGate(v, content, cfg.threshold, rescueCfg);
 
   const processOne = async (idx: number): Promise<void> => {
     const t = transcripts[idx];
@@ -2232,9 +2285,11 @@ export async function runTriagePass(
     if (cached && cacheValid) {
       cacheHits++;
       byPath.set(t.filePath, cached);
+      const g = gate(cached, t.content);
       reports[idx] = {
         filePath: t.filePath,
-        worth: gateWorth(cached.score),
+        worth: g.pass,
+        ...(g.rescued ? { rescued: true, verified_segments: g.verified_segments } : {}),
         score: cached.score,
         content_type: cached.content_type,
         reasons: cached.reasons,
@@ -2337,9 +2392,11 @@ export async function runTriagePass(
         model: cfg.model,
         triage_version: TRIAGE_VERSION,
       });
+      const g = gate(triage, t.content);
       reports[idx] = {
         filePath: t.filePath,
-        worth: gateWorth(triage.score),
+        worth: g.pass,
+        ...(g.rescued ? { rescued: true, verified_segments: g.verified_segments } : {}),
         score: triage.score,
         content_type: triage.content_type,
         reasons: triage.reasons,
@@ -2490,10 +2547,12 @@ export function buildTriageMapBlock(
   // is fabricated judge output — drop it rather than trust it. For a
   // single-chunk transcript chunkText IS the full content, so verbatim quotes
   // always survive.
-  const norm = (s: string): string => s.replace(/\s+/g, ' ').trim();
-  const normChunk = norm(chunkText);
+  // Shared grounding normalizer (F1b/F2 DRY): case + curly-quote + dash
+  // folding on TOP of whitespace collapse — a segment the judge case-shifted
+  // still verifies, while fabricated output still can't match.
+  const normChunk = normForGrounding(chunkText);
   const segments = (v.segments ?? []).filter(s => {
-    const prefix = norm(s.quote).slice(0, 60);
+    const prefix = normForGrounding(s.quote).slice(0, 60);
     return prefix.length > 0 && normChunk.includes(prefix);
   }).slice(0, 8);
   const lines: string[] = [

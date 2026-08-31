@@ -173,6 +173,73 @@ describe('runTriagePass — gate + threshold', () => {
   });
 });
 
+describe('runTriagePass — F2 verified-segment rescue at report construction', () => {
+  // A transcript whose content contains two substantive passages the judge
+  // can quote verbatim — the buried-signal shape.
+  const BURIED = makeTranscript('buried', [
+    'routine chatter about scheduling and lunch orders. ',
+    'I keep thinking our retention problem is actually an onboarding problem in disguise. ',
+    'more routine chatter. ',
+    'Decision: we kill the referral program next quarter because it cannibalizes organic signups. ',
+  ].join(''));
+  const SEGMENTS = [
+    { quote: 'our retention problem is actually an onboarding problem in disguise' },
+    { quote: 'we kill the referral program next quarter because it cannibalizes organic signups' },
+  ];
+
+  test('cached band verdict with verified segments → worth=true, rescued flagged (works on CACHED rows — no re-judge)', async () => {
+    const fake = makeFakeEngine();
+    seedVerdict(fake.rows, BURIED, { score: 0.35, content_type: 'mixed', segments: SEGMENTS });
+    const r = await runTriagePass(fake.engine, [BURIED], baseCfg(null));
+    expect(fake.putCalls).toBe(0); // rescue is gate-time: cached verdict, zero LLM
+    expect(r.reports[0].worth).toBe(true);
+    expect(r.reports[0].rescued).toBe(true);
+    expect(r.reports[0].verified_segments).toBe(2);
+  });
+
+  test('fresh band verdict rescues the same way (judge returns segments)', async () => {
+    const { engine } = makeFakeEngine();
+    const judge = scoredJudge(0.4, { content_type: 'mixed', segments: SEGMENTS });
+    const r = await runTriagePass(engine, [BURIED], baseCfg(judge));
+    expect(r.reports[0].worth).toBe(true);
+    expect(r.reports[0].rescued).toBe(true);
+  });
+
+  test('fabricated segments never rescue; routine content_type never rescues', async () => {
+    const fake = makeFakeEngine();
+    seedVerdict(fake.rows, BURIED, {
+      score: 0.35, content_type: 'mixed',
+      segments: [{ quote: 'a passage that appears nowhere in this transcript at all, invented' }],
+    });
+    const r1 = await runTriagePass(fake.engine, [BURIED], baseCfg(null));
+    expect(r1.reports[0].worth).toBe(false);
+    expect(r1.reports[0].rescued).toBeUndefined();
+
+    seedVerdict(fake.rows, BURIED, { score: 0.35, content_type: 'routine', segments: SEGMENTS });
+    const r2 = await runTriagePass(fake.engine, [BURIED], baseCfg(null));
+    expect(r2.reports[0].worth).toBe(false);
+  });
+
+  test('kill switch (rescue.minSegments=0) restores the plain threshold gate', async () => {
+    const fake = makeFakeEngine();
+    seedVerdict(fake.rows, BURIED, { score: 0.35, content_type: 'mixed', segments: SEGMENTS });
+    const r = await runTriagePass(fake.engine, [BURIED], baseCfg(null, {
+      rescue: { floor: 0.30, minSegments: 0, contentTypes: ['mixed'] },
+    }));
+    expect(r.reports[0].worth).toBe(false);
+  });
+
+  test('a rescued report is NOT below_threshold (the one-gate consistency the retriage sweep reads)', async () => {
+    const fake = makeFakeEngine();
+    seedVerdict(fake.rows, BURIED, { score: 0.35, content_type: 'mixed', segments: SEGMENTS });
+    const rejected = makeTranscript('rejected');
+    seedVerdict(fake.rows, rejected, { score: 0.35, content_type: 'mixed', segments: [] });
+    const r = await runTriagePass(fake.engine, [BURIED, rejected], baseCfg(null));
+    const belowThreshold = r.reports.filter(x => x.score !== null && !x.worth);
+    expect(belowThreshold.map(x => x.filePath)).toEqual([rejected.filePath]);
+  });
+});
+
 describe('runTriagePass — time budget (1C) + shouldStop', () => {
   test('maxMs expiry defers remaining MISSES (uncached) while cache hits stay free', async () => {
     const { engine, rows } = makeFakeEngine();

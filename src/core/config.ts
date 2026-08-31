@@ -1303,6 +1303,9 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
   // `models.dream.triage` (models.* prefix, registered via the models.dream.*
   // family); these tune the gate + sampling + pass budget.
   'dream.triage.threshold',
+  'dream.triage.rescue_floor',
+  'dream.triage.rescue_min_segments',
+  'dream.triage.rescue_content_types',
   'dream.triage.max_chars',
   'dream.triage.max_tokens',
   'dream.triage.max_ms',

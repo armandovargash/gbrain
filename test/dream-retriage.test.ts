@@ -258,6 +258,44 @@ describe('dream retriage — reconcile matrix', () => {
     }
   }, 30_000);
 
+  test('F2: a rescued-band job SURVIVES reconcile (the one-gate rule); the same score without segments cancels', async () => {
+    const rig = await setupRig();
+    try {
+      const buried = writeTranscript(rig.corpusDir, '2026-08-05-buried.txt');
+      const plain = writeTranscript(rig.corpusDir, '2026-08-06-plain.txt');
+      // Verified segments: verbatim (normalized) substrings of the transcript,
+      // each over the 40-normalized-char substantive bar and DISTINCT after
+      // normalization (duplicates count once).
+      const n = '2026-08-05-buried.txt';
+      await rig.engine.putDreamVerdict(buried.filePath, buried.hash, {
+        worth_processing: false,
+        reasons: ['seed'],
+        score: 0.35,
+        content_type: 'mixed',
+        segments: [
+          { quote: `conversation in ${n}\nconversation in ${n}` },
+          { quote: `in ${n} conversation in ${n} conversation` },
+        ],
+        entities: [],
+        model: TIER_DEFAULTS.utility,
+        triage_version: TRIAGE_VERSION,
+      });
+      await seedScore(rig, plain.filePath, plain.hash, 0.35); // same band, NO segments
+      const rescuedJob = await seedJob(rig, { key: synthKey('default', basename(buried.filePath), buried.hash16), queue: 'default' });
+      const plainJob = await seedJob(rig, { key: synthKey('default', basename(plain.filePath), plain.hash16), queue: 'default' });
+
+      const { out } = await captureStdout(() => withoutAnthropicKey(() => runDreamRetriage(rig.engine, ['--reconcile-queue', '--json'])));
+      const summary = JSON.parse(out) as { queue: { cancelled: number; kept_above_threshold: number }; reports?: Array<{ filePath: string; rescued?: boolean }> };
+
+      expect(await jobStatus(rig, rescuedJob)).toBe('waiting');   // rescue admitted it — sweep must not cancel
+      expect(await jobStatus(rig, plainJob)).toBe('cancelled');   // genuine reject
+      expect(summary.queue.cancelled).toBe(1);
+      expect(summary.queue.kept_above_threshold).toBe(1);
+    } finally {
+      await rig.cleanup();
+    }
+  }, 30_000);
+
   test('C9: key-source vs data.source_id mismatch is skipped, never cancelled', async () => {
     const rig = await setupRig();
     try {
