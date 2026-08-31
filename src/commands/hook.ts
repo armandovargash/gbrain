@@ -70,7 +70,9 @@ import {
   decideCorpusMode,
   gcCorpusArtifacts,
   HARVEST_RECEIPT_SUFFIX,
+  segmentHash,
 } from '../core/context/corpus-segments.ts';
+import { appendSessionReceipt } from '../core/context/hook-heartbeat.ts';
 import {
   heartbeatPath,
   hookStatusPath,
@@ -1517,6 +1519,20 @@ async function hookSessionEnd(io: HookIo): Promise<number> {
     sessionId = sanitizeSessionId(j?.session_id);
     ws = io.cwd ?? (typeof j?.cwd === 'string' ? (j.cwd as string) : process.cwd());
     const cfg = loadConfig();
+    // ONE gate for the whole Memorable integration, read BEFORE the parse so
+    // that a brain which has not opted in does not even collect tool calls:
+    // no receipt, no collection, no spawn, and a parse that costs exactly what
+    // it costs today. Off is the default and the absent case.
+    //
+    // The env override is a KILL switch, so it takes the same four spellings
+    // as search.track_retrieval's (core/last-retrieved.ts): an operator
+    // reaching for it under pressure types `false` at least as readily as
+    // `0`, and a kill switch that answers to one spelling and silently
+    // ignores the rest is worse than none.
+    const memorableOff = ['0', 'false', 'off', 'no'].includes(
+      (process.env.GBRAIN_MEMORABLE ?? '').trim().toLowerCase(),
+    );
+    const memorableAllowed = !memorableOff && cfg?.integrations?.memorable?.enabled === true;
 
     const conf = confineTranscriptPath(j?.transcript_path, {
       ...(io.transcriptRoot ? { root: io.transcriptRoot } : {}),
@@ -1524,7 +1540,7 @@ async function hookSessionEnd(io: HookIo): Promise<number> {
     if (!conf.ok) {
       degrade(`transcript_${conf.reason}`);
     } else {
-      const parsed = parseTranscript(conf.path);
+      const parsed = parseTranscript(conf.path, { collectToolCalls: memorableAllowed });
       turnsN = parsed.turns.length;
       bytesN = parsed.bytesRead;
       if (bytesN > 0 && turnsN === 0) {
@@ -1558,12 +1574,21 @@ async function hookSessionEnd(io: HookIo): Promise<number> {
           // [S3#2] Secret-scan AT WRITE TIME. Scanner absent → still write
           // (the corpus is 0700-local), but say so in the heartbeat.
           let text = toCorpusText(corpusTurns);
+          // The actual tool name + args, redacted through the SAME secret-scan
+          // pass as the corpus text rather than a second implementation of it.
+          // Covers the parsed window; the local consumer minimizes further to
+          // an allow-list of argument fields before anything leaves the
+          // machine. Only computed when the integration is on.
+          let toolCallsJson = '[]';
           try {
             const scan = await import('../core/secret-scan.ts');
             const redacted = scan.redactFindings(text);
             text = redacted.text;
             // COUNT only — the findings themselves never land in telemetry [S3#7].
             redactionsN = redacted.redactions.length;
+            if (memorableAllowed) {
+              toolCallsJson = scan.redactFindings(JSON.stringify(parsed.toolCalls)).text;
+            }
           } catch {
             degrade('scan_unavailable');
           }
@@ -1578,6 +1603,25 @@ async function hookSessionEnd(io: HookIo): Promise<number> {
           const tmpCorpus = `${corpusFile}.tmp-${process.pid}`;
           writeFileSync(tmpCorpus, text, { mode: 0o600 });
           renameSync(tmpCorpus, corpusFile);
+          // Additive signal for a local third-party consumer (never gbrain
+          // itself): the corpus file above is done, hashed over exactly the
+          // bytes that were written. That is post-redaction on the normal
+          // path; on the scan_unavailable degrade it is the unscanned text,
+          // which is why the receipt carries secret_scan_ok rather than
+          // implying the hash is always safe to publish. Writer lives next to
+          // the heartbeat it copies (core/context/hook-heartbeat.ts).
+          if (memorableAllowed) {
+            await appendSessionReceipt({
+              session_id: sessionId,
+              harness: io.harness ?? 'claude-code',
+              corpus_path: corpusFile,
+              content_hash: segmentHash(text),
+              turn_count: turnsN,
+              workspace_root: ws ?? process.cwd(),
+              tool_calls_json: toolCallsJson,
+              secret_scan_ok: redactionsN !== undefined,
+            });
+          }
           try {
             rmSync(corpusFile + CORPUS_INGESTED_SUFFIX, { force: true });
           } catch {

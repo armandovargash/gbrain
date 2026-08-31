@@ -174,3 +174,97 @@ export async function readHeartbeatTail(n: number): Promise<HookHeartbeatEntry[]
     return [];
   }
 }
+
+// ── Session receipts (memorable integration) ────────────────────────────────
+//
+// Folded in here rather than given its own module: it shares this file's
+// directory, its 0700/0600 permissions, its tail-rewrite compaction and its
+// never-throw contract, and it is written from the same session-end path.
+// Redaction is NOT reimplemented — the caller runs the corpus text and the
+// tool calls through the one existing secret-scan pass in core/secret-scan.ts
+// before anything reaches these functions.
+//
+// Nothing here runs unless the operator has turned the integration on; see
+// the single `memorableAllowed` gate in commands/hook.ts.
+
+export const SESSION_RECEIPTS_MAX_LINES = 2000;
+
+export interface SessionReceiptEntry {
+  ts: string;
+  session_id: string;
+  harness: 'claude-code' | 'codex' | 'opencode';
+  corpus_path: string;
+  content_hash: string;
+  turn_count: number;
+  workspace_root: string;
+  /**
+   * Secret-scanned JSON array of {name, input} for every tool_use block in
+   * the parsed window (see ToolCallRecord in claude-code-jsonl.ts) — the
+   * actual command/arguments, not the placeholder-only rendering the corpus
+   * text itself carries. '[]' when scanning failed or nothing ran.
+   */
+  tool_calls_json: string;
+  /** false when the secret-scan import failed and the corpus was written unscanned — see hook.ts's scan_unavailable degrade. */
+  secret_scan_ok: boolean;
+}
+
+export async function sessionReceiptsPath(): Promise<string> {
+  return join(await hooksTelemetryDir(), 'session-receipts.jsonl');
+}
+
+const RECEIPTS_COMPACT_CHECK_BYTES = 2 * SESSION_RECEIPTS_MAX_LINES * 80;
+
+/**
+ * Second axis for the same compaction. Line count alone is not a bound: one
+ * session with large tool arguments writes a line orders of magnitude past the
+ * 80-byte average this file's line budget assumes, and a handful of those
+ * never reach the line threshold — so the file grows without limit and every
+ * later append re-reads all of it.
+ */
+const RECEIPTS_MAX_BYTES = 8 * 1024 * 1024;
+
+/**
+ * The byte axis trims to HALF its ceiling, matching the 2x hysteresis the line
+ * axis already has (trigger at 2x MAX_LINES, keep MAX_LINES). Trimming back to
+ * exactly the ceiling would put the file on the threshold again after every
+ * single append, so every later session-end would rewrite the whole file
+ * through tmp+rename. That is not just IO: writeHeartbeat's own doc names the
+ * read→tmp→rename window as the one place a concurrent O_APPEND line can be
+ * silently dropped, and a per-append rewrite holds that window open on every
+ * session end instead of once per budget's worth of them.
+ */
+const RECEIPTS_TRIM_TARGET_BYTES = RECEIPTS_MAX_BYTES / 2;
+
+/** Append one receipt line. Never throws — a receipt-write failure must never break session-end. */
+export async function appendSessionReceipt(entry: Omit<SessionReceiptEntry, 'ts'>): Promise<void> {
+  try {
+    const p = await sessionReceiptsPath();
+    const line = JSON.stringify({ ts: new Date().toISOString(), ...entry });
+    appendFileSync(p, line + '\n', { mode: 0o600 });
+    let size = 0;
+    try {
+      size = statSync(p).size;
+    } catch {
+      /* just appended — best effort */
+    }
+    if (size > RECEIPTS_COMPACT_CHECK_BYTES) {
+      const lines = readFileSync(p, 'utf8').split('\n').filter((l) => l.trim().length > 0);
+      let kept = lines.length > 2 * SESSION_RECEIPTS_MAX_LINES ? lines.slice(-SESSION_RECEIPTS_MAX_LINES) : lines;
+      let bytes = kept.reduce((n, l) => n + l.length + 1, 0);
+      // Newest wins on both axes; the last line always survives, even alone.
+      const target = bytes > RECEIPTS_MAX_BYTES ? RECEIPTS_TRIM_TARGET_BYTES : RECEIPTS_MAX_BYTES;
+      while (kept.length > 1 && bytes > target) {
+        bytes -= kept[0]!.length + 1;
+        kept = kept.slice(1);
+      }
+      if (kept.length !== lines.length) {
+        const tmp = `${p}.tmp-${process.pid}`;
+        writeFileSync(tmp, kept.join('\n') + '\n', { mode: 0o600 });
+        renameSync(tmp, p);
+      }
+    }
+  } catch {
+    /* a receipt is an optional signal — never break the hook it describes */
+  }
+}
+

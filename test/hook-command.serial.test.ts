@@ -43,6 +43,8 @@ const ENV_KEYS = [
   // stop-push [D3/D17/D20] + banner [D5] + cloud detection knobs
   'GBRAIN_STOP_PUSH', 'GBRAIN_STOP_PUSH_DEBOUNCE_MIN', 'CLAUDE_CODE_REMOTE',
   'CLAUDE_CODE_REMOTE_SESSION_ID', 'GH_TOKEN', 'GITHUB_TOKEN',
+  // optional Memorable integration: config gate + env kill switch
+  'GBRAIN_MEMORABLE',
 ] as const;
 
 let tmp: string;
@@ -1418,6 +1420,114 @@ describe('compact segment lane (cathedral 5)', () => {
     const body = readFileSync(join(corpus(), files[0]), 'utf8');
     expect(body).not.toContain(planted);
     expect(body).toContain('<REDACTED:openai>');
+  });
+});
+
+describe('session-end — optional Memorable integration gate', () => {
+  const RECEIPTS = () => join(home(), 'integrations', 'hooks', 'session-receipts.jsonl');
+
+  /** Run one session-end with the integration config as given. */
+  async function endSession(id: string, enabled: unknown, opts: { configured?: boolean } = {}): Promise<void> {
+    mkdirSync(home(), { recursive: true });
+    writeFileSync(
+      join(home(), 'config.json'),
+      JSON.stringify(
+        opts.configured === false ? { engine: 'pglite' } : { engine: 'pglite', integrations: { memorable: { enabled } } },
+      ),
+    );
+    const projRoot = join(tmp, 'projects');
+    const ws = join(tmp, 'ws');
+    mkdirSync(ws, { recursive: true });
+    const transcript = seedTranscript(join(projRoot, 'p1'), `${id}.jsonl`, [
+      userLine('rotate the TLS cert'),
+      assistantLine('done'),
+    ]);
+    expect(
+      await runHook(['session-end'], {
+        stdin: JSON.stringify({ session_id: id, transcript_path: transcript, cwd: ws }),
+        transcriptRoot: projRoot,
+      }),
+    ).toBe(0);
+  }
+
+  test('off by default: an unconfigured brain writes its corpus and no receipt at all', async () => {
+    await endSession('sess-off', undefined, { configured: false });
+    expect(existsSync(join(home(), 'transcripts', 'corpus', 'sess-off.txt'))).toBe(true);
+    expect(existsSync(RECEIPTS())).toBe(false);
+  });
+
+  test('only the literal boolean true opens the gate — every other spelling reads as off', async () => {
+    // isConfigTruthy accepts "true"/"on"/"yes"/1 for OTHER keys; this gate
+    // deliberately does not, so a hand-edited config can only fail closed.
+    for (const [i, value] of [false, null, 'true', 'on', 'yes', 1, 0, 'false', {}, []].entries()) {
+      await endSession(`sess-gate-${i}`, value);
+      expect(existsSync(RECEIPTS())).toBe(false);
+    }
+    await endSession('sess-gate-on', true);
+    expect(existsSync(RECEIPTS())).toBe(true);
+  });
+
+  test('the receipt is 0600 inside the 0700 hooks dir, same as heartbeat.jsonl', async () => {
+    await endSession('sess-mode', true);
+    expect(statSync(RECEIPTS()).mode & 0o777).toBe(0o600);
+    expect(statSync(join(home(), 'integrations', 'hooks')).mode & 0o777).toBe(0o700);
+    expect(statSync(join(home(), 'integrations')).mode & 0o777).toBe(0o700);
+  });
+
+  test('the receipt carries the real tool args, post-redaction, and the corpus hash', async () => {
+    mkdirSync(home(), { recursive: true });
+    writeFileSync(
+      join(home(), 'config.json'),
+      JSON.stringify({ engine: 'pglite', integrations: { memorable: { enabled: true } } }),
+    );
+    const projRoot = join(tmp, 'projects');
+    const ws = join(tmp, 'ws');
+    mkdirSync(ws, { recursive: true });
+    const planted = 'sk-' + 'FAKEfakeFAKEfake1234567890';
+    const transcript = join(projRoot, 'p1', 'tools.jsonl');
+    mkdirSync(join(projRoot, 'p1'), { recursive: true });
+    writeFileSync(
+      transcript,
+      [
+        JSON.stringify({ type: 'user', message: { role: 'user', content: 'deploy it' } }),
+        JSON.stringify({
+          type: 'assistant',
+          message: {
+            role: 'assistant',
+            content: [{ type: 'tool_use', id: 'tu-1', name: 'Bash', input: { command: `deploy --key ${planted}` } }],
+          },
+        }),
+        JSON.stringify({
+          type: 'user',
+          message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tu-1', content: 'ok' }] },
+        }),
+      ].join('\n') + '\n',
+    );
+    await runHook(['session-end'], {
+      stdin: JSON.stringify({ session_id: 'sess-tools', transcript_path: transcript, cwd: ws }),
+      transcriptRoot: projRoot,
+    });
+    const line = JSON.parse(readFileSync(RECEIPTS(), 'utf8').trim().split('\n').pop()!);
+    expect(line.session_id).toBe('sess-tools');
+    expect(line.secret_scan_ok).toBe(true);
+    const calls = JSON.parse(line.tool_calls_json);
+    expect(calls[0].name).toBe('Bash');
+    // The real command, with the secret scrubbed by the SAME pass the corpus
+    // goes through — not a second redaction implementation.
+    expect(calls[0].input.command).toContain('deploy --key');
+    expect(line.tool_calls_json).not.toContain(planted);
+    expect(calls[0].result).toEqual({ ok: true });
+  });
+
+  test('GBRAIN_MEMORABLE kills it in every spelling search.track_retrieval accepts', async () => {
+    for (const [i, spelling] of ['0', 'false', 'off', 'no', 'FALSE', ' 0 '].entries()) {
+      process.env.GBRAIN_MEMORABLE = spelling;
+      await endSession(`sess-kill-${i}`, true);
+      expect(existsSync(RECEIPTS())).toBe(false);
+    }
+    delete process.env.GBRAIN_MEMORABLE;
+    await endSession('sess-kill-on', true);
+    expect(existsSync(RECEIPTS())).toBe(true);
   });
 });
 
