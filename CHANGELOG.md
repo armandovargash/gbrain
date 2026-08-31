@@ -43,6 +43,13 @@ until a human accepts an explicit disclosure.
   (claude-code and codex each pin their own transcript root and parser);
   transcript parsing skips tool-call collection entirely when the
   integration is off, so the default path does less work than before.
+- Absorbed the leaner re-cut of the integration from community PR #4743
+  (thank you again @NIkhil-cmd-cmd): tool-call collection is now OPT-IN at
+  the parser level (the per-prompt lanes never collect tool inputs for
+  brains that never opted in), every string in a collected tool-call input
+  is bounded (32k with an explicit omission marker) on both capture lanes,
+  and a dozen of its sharpest test pins were ported onto the hardened
+  implementation.
 - The `bootstrap_hooks_heartbeat` doctor message now surfaces the most
   common degrade reason in an otherwise-healthy window.
 - Nightly real-binary door pins refreshed (hermes installer digest reviewed

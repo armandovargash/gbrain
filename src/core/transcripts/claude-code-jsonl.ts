@@ -200,11 +200,14 @@ export interface ParsedTranscript {
    */
   boundaryTurnIndexes: number[];
   /**
-   * Additive (memorable integration): the tool name + raw input args for every
+   * Additive (memorable integration): the tool name + input args for every
    * tool_use block, oldest → newest — the actual command/arguments entryToTurn
    * deliberately discards down to a bare `[tool: name]` placeholder for the
-   * token-budget-constrained ambient-recall path. Does not change `turns` or
-   * any existing field; existing callers that don't read this field see no
+   * token-budget-constrained ambient-recall path. Populated ONLY when the
+   * caller passes `collectToolCalls: true`; the bare parse returns `[]`.
+   * String values are bounded to TOOL_CALL_VALUE_MAX_CHARS (capToolCallInput),
+   * so a Write's file body never lands whole. Does not change `turns` or any
+   * existing field; existing callers that don't read this field see no
    * behavior change.
    */
   toolCalls: ToolCallRecord[];
@@ -459,7 +462,7 @@ function entryToToolCalls(entry: unknown): ToolCallWithId[] {
  * call makes the receipt line (and the relay payload derived from it)
  * arbitrarily large. Facts under the cap are never rewritten; over it, the
  * truncation is explicit — `…[N chars omitted]` — so a consumer can tell a
- * capped value from a short one. (From #4743, contributed by @NIkhil-cmd-cmd.)
+ * capped value from a short one.
  */
 export const TOOL_CALL_VALUE_MAX_CHARS = 32_000;
 

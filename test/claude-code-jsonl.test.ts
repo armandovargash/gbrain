@@ -507,7 +507,7 @@ describe('parseTranscript toolCalls — the record is bounded (#4743)', () => {
     const write = r.toolCalls[0]!.input as { file_path: string; content: string };
     expect(write.file_path).toBe('/repo/blob.txt');
     expect(write.content.startsWith('A'.repeat(TOOL_CALL_VALUE_MAX_CHARS))).toBe(true);
-    expect(write.content).toContain('[5000 chars omitted]');
+    expect(write.content).toContain('…[5000 chars omitted]');
     expect(write.content.length).toBeLessThan(TOOL_CALL_VALUE_MAX_CHARS + 100);
     // The sibling command is a fact, and facts are never rewritten.
     expect((r.toolCalls[1]!.input as { command: string }).command).toBe('pytest -q tests/');
@@ -527,7 +527,26 @@ describe('parseTranscript toolCalls — the record is bounded (#4743)', () => {
     }) + '\n', { mode: 0o600 });
     const r = parse(p);
     const edits = (r.toolCalls[0]!.input as { edits: Array<{ new_string: string }> }).edits;
-    expect(edits[0]!.new_string).toContain('[1 chars omitted]');
+    expect(edits[0]!.new_string).toContain('…[1 chars omitted]');
     expect(edits[0]!.new_string.length).toBeLessThan(TOOL_CALL_VALUE_MAX_CHARS + 100);
+  });
+
+  test('pathological nesting past the depth cap reads as null, never a stack overflow', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'gbrain-cap-depth-'));
+    tmp = dir;
+    const p = join(dir, 'deep.jsonl');
+    // 12 levels of {a: {a: …}} — past TOOL_CALL_MAX_DEPTH (8).
+    let deep: unknown = 'leaf';
+    for (let i = 0; i < 12; i++) deep = { a: deep };
+    writeFileSync(p, JSON.stringify({
+      type: 'assistant',
+      message: { role: 'assistant', content: [{ type: 'tool_use', id: 'd', name: 'Deep', input: deep }] },
+    }) + '\n', { mode: 0o600 });
+    const r = parse(p);
+    // The record exists and JSON-serializes; somewhere below the cap the
+    // chain terminates in null instead of the leaf string.
+    const json = JSON.stringify(r.toolCalls[0]!.input);
+    expect(json).not.toContain('leaf');
+    expect(json).toContain('null');
   });
 });

@@ -69,6 +69,21 @@ describe('parseCodexHookTranscript', () => {
     ]);
   });
 
+  test('observed args are bounded by the shared cap — one receipt-size ceiling for every harness', () => {
+    const p = join(dir, 'rollout-cap.jsonl');
+    const body = 'C'.repeat(40_000); // over TOOL_CALL_VALUE_MAX_CHARS (32k)
+    const fatCall = JSON.stringify({
+      timestamp: 't',
+      type: 'response_item',
+      payload: { type: 'function_call', name: 'shell', arguments: JSON.stringify({ command: body }) },
+    });
+    writeFileSync(p, [meta, user('write it'), fatCall].join('\n') + '\n');
+    const parsed = parseCodexHookTranscript(p, { collectToolCalls: true });
+    const input = parsed.toolCalls[0]!.input as { command: string };
+    expect(input.command).toContain('…[8000 chars omitted]');
+    expect(input.command.length).toBeLessThan(40_000);
+  });
+
   test('compacted rows record boundary positions in turn space', () => {
     const p = join(dir, 'rollout-3.jsonl');
     writeFileSync(p, [meta, user('one'), boundary, user('two'), assistant('three')].join('\n') + '\n');

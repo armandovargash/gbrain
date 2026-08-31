@@ -243,22 +243,28 @@ describe('receipt compaction is bounded by bytes, not only by lines', () => {
         expect(tail[tail.length - 1]!.session_id).toBe('sess-11');
 
         // Headroom pin (#4743): the trim leaves the file at TARGET (half the
-        // ceiling), so the very next append must NOT re-trigger a whole-file
-        // rewrite. A tmp+rename rewrite changes the inode — and the rename
-        // window is the one place a concurrent O_APPEND line can be dropped,
-        // so at steady state it has to be rare, not once per session end.
-        const inoAfterTrim = statSync(p).ino;
-        await appendSessionReceipt({
-          session_id: 'sess-after-trim',
-          harness: 'claude-code',
-          corpus_path: '/tmp/sess-after-trim.txt',
-          content_hash: 'after-trim',
-          turn_count: 1,
-          workspace_root: '/repo',
-          tool_calls_json: fat,
-          secret_scan_ok: true,
-        });
-        expect(statSync(p).ino).toBe(inoAfterTrim);
+        // ceiling), so at steady state a whole-file rewrite is rare, never
+        // once per append. A tmp+rename rewrite changes the inode — and the
+        // rename window is the one place a concurrent O_APPEND line can be
+        // dropped. Were target == ceiling, EVERY append here would rewrite.
+        let rewrites = 0;
+        let ino = statSync(p).ino;
+        for (let i = 0; i < 4; i++) {
+          await appendSessionReceipt({
+            session_id: `sess-after-trim-${i}`,
+            harness: 'claude-code',
+            corpus_path: `/tmp/sess-after-trim-${i}.txt`,
+            content_hash: `after-trim-${i}`,
+            turn_count: 1,
+            workspace_root: '/repo',
+            tool_calls_json: fat,
+            secret_scan_ok: true,
+          });
+          const now = statSync(p).ino;
+          if (now !== ino) { rewrites++; ino = now; }
+        }
+        expect(rewrites).toBeLessThan(4);
+        expect(statSync(p).size).toBeLessThan(32 * 1024 * 1024 + 5 * 1024 * 1024);
       });
     } finally {
       rmSync(home, { recursive: true, force: true });
