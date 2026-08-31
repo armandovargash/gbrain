@@ -21,7 +21,8 @@
  * Corpus discipline: fixtures are frozen HERE, distinct from the Cat 35
  * corpus (no tuning coupling), placeholder names only.
  */
-import { describe, test, expect } from 'bun:test';
+import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
+import { withEnv } from './helpers/with-env.ts';
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -153,15 +154,26 @@ function scriptedTransport(brainScaffoldSlug: string) {
 }
 
 describe('F-Eval: hermetic write-path mini-eval (real phase, scripted transport)', () => {
-  test('gate+rescue admit the right transcripts; repair ladder fixes real pages; units survive to disk', async () => {
-    const engine = new PGLiteEngine();
+  let engine: PGLiteEngine;
+  let brainDir: string;
+  let corpusDir: string;
+  beforeAll(async () => {
+    engine = new PGLiteEngine();
     await engine.connect({ engine: 'pglite' } as never);
     await engine.initSchema();
-    const brainDir = mkdtempSync(join(tmpdir(), 'gbrain-minieval-brain-'));
-    const corpusDir = mkdtempSync(join(tmpdir(), 'gbrain-minieval-corpus-'));
-    const savedKey = process.env.ANTHROPIC_API_KEY;
-    process.env.ANTHROPIC_API_KEY = 'sk-test-mini-eval';
-    try {
+    brainDir = mkdtempSync(join(tmpdir(), 'gbrain-minieval-brain-'));
+    corpusDir = mkdtempSync(join(tmpdir(), 'gbrain-minieval-corpus-'));
+  });
+  afterAll(async () => {
+    __setChatTransportForTests(null);
+    resetGateway();
+    try { await engine.disconnect(); } catch { /* best-effort */ }
+    try { rmSync(brainDir, { recursive: true, force: true }); } catch { /* */ }
+    try { rmSync(corpusDir, { recursive: true, force: true }); } catch { /* */ }
+  });
+
+  test('gate+rescue admit the right transcripts; repair ladder fixes real pages; units survive to disk', async () => {
+    {
       // Scaffold page so the wikilink mandate is satisfiable (Cat 35 pattern).
       const scaffold = 'people/alice-example';
       await importFromContent(engine, scaffold, '---\ntype: person\n---\nAlice Example, a founder.', { noEmbed: true, remote: false, sourceId: 'default' });
@@ -175,7 +187,10 @@ describe('F-Eval: hermetic write-path mini-eval (real phase, scripted transport)
       for (const f of FIXTURES) writeFileSync(join(corpusDir, f.basename), f.content);
 
       __setChatTransportForTests(scriptedTransport(scaffold));
-      const result = await runPhaseSynthesize(engine, { brainDir, dryRun: false });
+      // Fake key via withEnv (R1): hasAnthropicKey() must see one so the
+      // judge client exists — the transport stub intercepts every real call.
+      const result = await withEnv({ ANTHROPIC_API_KEY: 'sk-test-mini-eval' }, () =>
+        runPhaseSynthesize(engine, { brainDir, dryRun: false }));
       expect(result.status).toBe('ok');
       const details = result.details as {
         pages_written: number;
@@ -240,14 +255,6 @@ describe('F-Eval: hermetic write-path mini-eval (real phase, scripted transport)
       expect(details.synthesis.spend.cost_basis).toBe('in+out+cache_read');
       expect(details.synthesis.spend.triage.tokens_in).toBeGreaterThan(0);
       expect(details.synthesis.children_zero_pages).toBe(0);
-    } finally {
-      if (savedKey === undefined) delete process.env.ANTHROPIC_API_KEY;
-      else process.env.ANTHROPIC_API_KEY = savedKey;
-      __setChatTransportForTests(null);
-      resetGateway();
-      try { await engine.disconnect(); } catch { /* best-effort */ }
-      try { rmSync(brainDir, { recursive: true, force: true }); } catch { /* */ }
-      try { rmSync(corpusDir, { recursive: true, force: true }); } catch { /* */ }
     }
   }, 120_000);
 });

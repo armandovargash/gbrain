@@ -5,7 +5,7 @@
  * replacement is a verbatim transcript slice; ungroundable spans lose their
  * quote marks but keep their text.
  */
-import { describe, test, expect } from 'bun:test';
+import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
 import {
   normalizeForGrounding,
   normForGrounding,
@@ -185,11 +185,18 @@ describe('countUngroundedNumericClaims (F4b, warn-only)', () => {
 });
 
 describe('verifyAndRepairDreamPages — PGLite write-back integration', () => {
-  test('repairs the DB page via the canonical pipeline; scopes to hash-suffixed slugs; fail-open counters', async () => {
-    const engine = new PGLiteEngine();
+  let engine: PGLiteEngine;
+  beforeAll(async () => {
+    engine = new PGLiteEngine();
     await engine.connect({ engine: 'pglite' } as never);
     await engine.initSchema();
-    try {
+  });
+  afterAll(async () => {
+    try { await engine.disconnect(); } catch { /* best-effort */ }
+  });
+
+  test('repairs the DB page via the canonical pipeline; scopes to hash-suffixed slugs; fail-open counters', async () => {
+    {
       const transcript = 'user: The verdict was “ship the repair pass now — measure later.” That is the whole plan.';
       const hash6 = 'abc123';
       const slug = `wiki/personal/reflections/2026-08-31-repair-pass-${hash6}`;
@@ -235,8 +242,6 @@ describe('verifyAndRepairDreamPages — PGLite write-back integration', () => {
       // Untouched pre-existing page keeps its quote verbatim.
       const alice = await engine.getPage('wiki/people/alice-example', { sourceId: 'default' });
       expect(`${alice?.compiled_truth ?? ''}`).toContain('"something from an entirely different source conversation"');
-    } finally {
-      try { await engine.disconnect(); } catch { /* best-effort */ }
     }
   }, 60_000);
 });

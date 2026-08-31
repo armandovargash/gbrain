@@ -13,7 +13,8 @@
  *      live backlog largely sits in dead per-run `dream-inline-*` queues no
  *      worker will ever drain), match (basename, hash16) to discovered
  *      transcripts, then:
- *        - matched below threshold      → cancel (frontier job not worth it)
+ *        - matched below the gate (threshold OR verified-segment rescue —
+ *          ONE predicate with the synthesize fan-out) → cancel
  *        - matched above, stale queue   → cancel as `converted_for_resubmit`
  *          (cancelled rows release their idempotency slot, so the next cycle
  *          re-adds them into ITS live private drain — this is what actually
@@ -193,12 +194,13 @@ NOTES
   cancelled — they count as kept_live_queue. Running retriage while a cycle
   is active may double-judge some cache misses (benign: last write wins).
 
-RECONCILE SEMANTICS
-  matched + score <  threshold                  cancel
-  matched + score >= threshold, dead dream-inline-* queue (older than 1h)
+RECONCILE SEMANTICS (gate = threshold pass OR the verified-segment rescue —
+the same passesTriageGate the synthesize fan-out reads)
+  matched + below gate                          cancel
+  matched + passes gate, dead dream-inline-* queue (older than 1h)
                                                 cancel (converted_for_resubmit —
                                                 next cycle re-adds it into a live drain)
-  matched + score >= threshold, live queue      keep
+  matched + passes gate, live queue             keep
   matched, no reliable score                    keep
   unmatched / unparseable key                   keep (cancel with --cancel-unmatched)
   legacy dream:synth: (v1) keys                 never touched

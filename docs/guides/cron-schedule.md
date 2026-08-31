@@ -132,6 +132,20 @@ per-transcript synthesis subagents. The dials:
 - `dream.triage.max_tokens` (default 2048, floor 256) — judge output budget.
 - `dream.triage.concurrency` (default 4, clamped 1–16) — concurrent judge
   calls.
+- **Verified-segment rescue** (buried-signal recovery, $0): a transcript whose
+  score lands in `[dream.triage.rescue_floor, threshold)` still passes when at
+  least `dream.triage.rescue_min_segments` (default 2; **0 disables**) of the
+  judge's own quoted segments verify as substrings of the transcript AND its
+  content type is in `dream.triage.rescue_content_types` (default
+  `mixed,reflection,idea,strategy,people` — never routine/technical). Zero
+  extra LLM calls; works on cached verdicts; `dream retriage` reads the same
+  gate, so a reconcile sweep never cancels rescued jobs. Telemetry:
+  `details.triage.rescue_checked` / `rescue_fired`.
+- `dream.synthesize.quote_verify` (default on) — the mechanical post-write
+  quote verify/repair pass on newly-created dream pages (paraphrased "quotes"
+  are repaired to verbatim transcript slices or unquoted; never invented).
+  The off switch is the incident escape hatch; telemetry lands in
+  `details.synthesis.quote_verify`.
 - `dream.synthesize.max_turns` (default 16) — synthesis turn budget for
   agentic children and oneshot fallbacks (the default oneshot path — see
   the next section — is a single completion and never spends turns). The
@@ -152,7 +166,10 @@ per-transcript synthesis subagents. The dials:
   for busy deployments.
 
 Maintenance recipe — after changing the threshold, upgrading through a
-`TRIAGE_VERSION` bump, or to drain a queued synthesis backlog:
+`TRIAGE_VERSION` bump (the eval fix wave ships v2: peak-not-average scoring —
+the first post-upgrade cycle re-judges the corpus within the `max_ms` budget
+and defers the rest to following cycles), or to drain a queued synthesis
+backlog:
 
 ```bash
 gbrain dream retriage --dry-run          # what would change (zero LLM calls)
