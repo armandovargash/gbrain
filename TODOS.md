@@ -1,5 +1,75 @@
 # TODOS
 
+## Eval write-path fix wave follow-ups (filed 2026-08-31; the five CEO-review-deferred items — wave receipt: gbrain-evals Cat 35 bracketing runs, pre-wave baseline dream 70.2% / quote fidelity 54.2% / emission 16/20 at aa820c7f)
+
+- [ ] **P3 — E2: chunk-boundary overlap window in splitTranscriptByBudget.**
+  **What:** carry ~5% tail overlap between adjacent transcript chunks so salient
+  units straddling a boundary aren't structurally invisible to either child.
+  **Why:** each chunk's prompt says "do not assume continuity"; a unit split
+  across the cut is lost to both. **Blocked on:** post-wave Cat 35 receipts
+  showing transcripts actually chunk (`details.synthesis.jobs` >
+  `transcripts_processed`) — don't pay the determinism-test churn
+  (test/e2e/dream-synthesize-chunking byte-stability) before the receipts say
+  it matters. **Where:** src/core/cycle/synthesize.ts splitTranscriptByBudget.
+- [ ] **P3 — E3: borderline-band second-pass triage call (#4152 escalation).**
+  **What:** when the scalar score lands in [rescue_floor, threshold) and the
+  verified-segment rescue does NOT fire, spend one extra focused judge call
+  scoring the PEAK passage alone; max(scores) gates. **Why:** the rescue only
+  fires when the first judge surfaced verifiable segments; telemetry
+  (`triage.rescue_checked` high with `rescue_fired` low across cycles) would
+  mean buried signal is still slipping. **Blocked on:** exactly that telemetry
+  — the wave's live calibration showed rubric v2 alone lifts the class, so
+  don't add spend until production distributions disagree. **Where:**
+  runTriagePass processOne + triage-rescue.ts.
+- [ ] **P2 — E4: wire-or-delete the three undispatchable eval scaffolds.**
+  **What:** src/commands/eval-markdown-greenfield.ts, eval-extract-atoms.ts,
+  eval-schema-authoring.ts are registered nowhere in eval.ts/cli.ts dispatch;
+  the first two return ok:true with status not_yet_implemented — the exact
+  dishonest-envelope class #4198 fixed for synthesize-concepts. **Why:** an
+  eval surface that reports ok for work it never ran corrodes trust in every
+  other receipt. **How:** either add dispatch + honest not_implemented
+  envelopes (ok:false, nonzero exit) or delete the files + their scaffold test.
+- [ ] **P2 — E5: adaptive-return config plane + KNOBS_HASH fold (its own wave).**
+  **What:** (a) the four search.adaptive_return* keys are a DB-config no-op
+  (not in KNOWN_CONFIG_KEYS; config-db-merge folds only cycle.*; GBrainConfig
+  has no search block) — register + fold or move onto the ModeBundle ladder
+  like autocut; (b) fold gate params into knobsHash (append-only,
+  KNOBS_HASH_VERSION bump) so adaptive-on calls cache (today gate-on ==
+  cache-cold, hybrid.ts skipCache); (c) widen AdaptiveQueryIntent with
+  'concept' (drop the hybrid.ts:2141 coercion). **Why:** prerequisite for the
+  cross-surface ablation + any default flip (TODOS v0.41.33.0 section).
+- [ ] **P3 — E8: quote-verify coverage is partial on the agentic fallback path.**
+  **What:** the verify pass scopes to pages whose slug carries the transcript's
+  hash6 (`ref.slug.includes('-' + hash6)`), but that suffix is enforced
+  fail-closed only in ONESHOT mode (subagent-oneshot.ts `oneshot_slug_suffix`
+  check). An agentic-fallback child that drops the suffix creates a page the
+  verify pass skips and mislabels `skipped_preexisting` — coverage is silently
+  thinnest on the path most likely to produce sloppy output. **How:** enforce
+  the suffix server-side in the subagent put_page tool for agentic children
+  too, or at minimum split a `skipped_unbound_new_page` counter with a stderr
+  warn so the gap is observable. **From:** eval fix wave red-team review.
+- [ ] **P3 — E9: no retrofit path for unverified dream pages.**
+  **What:** quote verify only covers the CURRENT run's writtenRefs. A crash or
+  abort between child completion and the verify pass strands pages with
+  unrepaired quotes forever — and the TRIAGE_VERSION 2 bump widens the window
+  (a transcript whose children completed under v1 may re-judge below the gate
+  under v2 and never re-enter the fan-out). **How:** an operator command
+  (`gbrain dream verify --recheck`) over `frontmatter->>'dream_generated'`
+  pages matched to transcripts by raw_source/hash6, or a per-page verified
+  marker in the provenance stamp so a later cycle can find and repair them
+  regardless of the gate's current verdict. **From:** eval fix wave red-team
+  review.
+- [ ] **P3 — E7: LLM grounding judge on dream pages (TRUSTMEM-style).**
+  **What:** an opt-in verify pass that judges every dream-page claim against
+  its source transcript (coverage/preservation/faithfulness), beyond the
+  mechanical quote/numeric checks the wave shipped. **Why:** the wave's
+  synthesize-verify.ts repairs QUOTES mechanically at $0; ungrounded
+  non-quote claims (hallucination ~14%) need semantics. Field context:
+  2026 write-path research (TRUSTMEM, arXiv 2606.25161) validates
+  verify-at-write. **Costs:** per-page LLM spend on every nightly cycle —
+  needs spend.posture gates + a config default OFF. **Where:** extend the
+  synthesize-verify pass; reuse normalizeForGrounding + the receipt fields.
+
 ## Fix-wave follow-ups (filed 2026-08-29, follow-up from the v0.47.x fix wave)
 
 - [ ] **P1 — #4599 root-cause instrumentation loop.** **What:** the embed
@@ -2730,13 +2800,16 @@ Filed from the #1981 ship (v0.42.39.0). Deliberately scoped OUT — the v1 extra
 is deterministic + precision-biased. See plan + GSTACK REVIEW REPORT at
 `~/.claude/plans/system-instruction-you-are-working-wild-yeti.md`.
 
-- [ ] **P3 — broaden entity detection beyond proper-case ASCII.** The extractor
-  (`src/core/context/entity-salience.ts`) misses lowercase names and many non-Latin
-  scripts; these need an LLM pass or script-aware heuristics. **Why:** higher recall
-  on the read side. **Where:** `entity-salience.ts`. *(Partially done by the #2095
-  wave: `extractCandidatesFromWindow` now covers assistant-introduced entities and
-  pronoun follow-ups whose antecedent was NAMED in the rolling window; true pronoun
-  coreference for never-named antecedents remains with the LLM-pass idea.)*
+- [ ] **P3 — broaden entity detection beyond the current passes.** MOSTLY DONE by
+  later waves — the remaining gaps are narrower than this entry's original claim
+  (updated by the eval fix wave, 2026-08-31): lowercase Latin names now emit as WEAK
+  candidates resolved via the alias arm (v0.46.15, kta 0.150→0.0000 in
+  `evals/brainbench/baselines/main.json`), CJK names via weak n-grams (#3746).
+  STILL OPEN: lowercase SURNAME-only mentions ("did galewright follow up" — weak
+  candidates never reach the surname arm, retrieval-reflex.ts:195-230), caseless
+  non-CJK scripts (Arabic/Hebrew/Devanagari/Thai — \p{Lo} invisible to both passes),
+  pure-hiragana grams, and true pronoun coreference (LLM-pass idea). **Where:**
+  `entity-salience.ts`, `retrieval-reflex.ts`.
 - [x] **P3 — recall knob: optional fuzzy/prefix-expansion resolution.** RESOLVED
   differently by the v0.46.15 identity wave, with a receipt: trigram fuzzy in the
   reflex is deliberately REJECTED — the BrainBench adversarial near-miss class
