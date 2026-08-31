@@ -203,11 +203,14 @@ describe('remember — contract behavior', () => {
     // stored idea fact flows back through recall. A response schema omitting
     // it would declare a contract the system itself violates. Widening a
     // response enum is strictly permissive for consumers.
-    const src = readFileSync(new URL('../src/core/verbs.ts', import.meta.url), 'utf-8');
-    expect(src).toContain("FACT_KINDS_RESPONSE = [...FACT_KINDS, 'idea']");
-    expect(src).toContain("kind: { type: 'string', enum: FACT_KINDS_RESPONSE as unknown as string[] }");
-    // ...and the input enum still reads from the frozen constant.
-    expect(src).toContain('enum: [...FACT_KINDS],');
+    const { RESPONSE_SCHEMAS } = require('../src/core/verbs.ts') as {
+      RESPONSE_SCHEMAS: Record<string, Record<string, unknown>>;
+    };
+    const facts = ((RESPONSE_SCHEMAS.recall as Record<string, Record<string, Record<string, unknown>>>)
+      .properties?.facts) as Record<string, Record<string, Record<string, Record<string, unknown>>>>;
+    const kindEnum = facts?.items?.properties?.kind?.enum as string[] | undefined;
+    expect(kindEnum).toEqual(['event', 'preference', 'commitment', 'belief', 'fact', 'idea']);
+    // ...while the remember INPUT enum stays frozen at five (asserted above).
   });
 
   it('rejects empty provenance with provenance_required + a populated suggestion', async () => {
