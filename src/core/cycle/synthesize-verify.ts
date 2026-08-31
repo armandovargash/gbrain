@@ -141,11 +141,32 @@ function emptyStats(): QuoteVerifyStats {
  * nothing — back into a page as a "verbatim" repair).
  */
 export function normalizeForGrounding(s: string): { norm: string; map: number[] } {
+  return foldForGrounding(s, true) as { norm: string; map: number[] };
+}
+
+/**
+ * The ONE folding core. `withMap=false` skips the offset-map allocation (an
+ * 8-byte-per-char array the presence-check callers throw away) but runs the
+ * IDENTICAL fold, so `normForGrounding(x) === normalizeForGrounding(x).norm`
+ * holds by construction rather than by assertion — including the cases a
+ * whole-string `.toLowerCase()` fast path got wrong (Greek final sigma
+ * 'ΟΔΟΣ' → per-char 'οδοσ' vs whole-string 'οδος', and non-BMP pairs).
+ * Parity matters: the rescue gate and the repair ladder must mean the same
+ * thing by "normalized substring of the transcript".
+ */
+function foldForGrounding(s: string, withMap: boolean): { norm: string; map: number[] } | string {
   const out: string[] = [];
   const map: number[] = [];
   let pendingSpace = false;
-  for (let i = 0; i < s.length; i++) {
-    let ch = s[i];
+  // Iterate by CODE POINT (for..of), not code unit: a surrogate pair
+  // lowercases as a pair (Deseret 𐐀 → 𐐨) but never half by half, so a
+  // per-unit loop would silently leave non-BMP text unfolded and diverge
+  // from the mapless path. `idx` tracks the code-unit offset for the map.
+  let idx = 0;
+  for (const cp of s) {
+    const i = idx;
+    idx += cp.length;
+    let ch = cp;
     if (/\s/.test(ch)) {
       pendingSpace = out.length > 0;
       continue;
@@ -155,32 +176,27 @@ export function normalizeForGrounding(s: string): { norm: string; map: number[] 
     else if (ch === '–' || ch === '—' || ch === '−') ch = '-';
     if (pendingSpace) {
       out.push(' ');
-      map.push(map.length > 0 ? map[map.length - 1] : i);
+      if (withMap) map.push(map.length > 0 ? map[map.length - 1] : i);
       pendingSpace = false;
     }
     const low = ch.toLowerCase();
-    for (let k = 0; k < low.length; k++) {
-      out.push(low[k]);
-      map.push(i);
+    for (const lowCp of low) {
+      out.push(lowCp);
+      if (withMap) for (let k = 0; k < lowCp.length; k++) map.push(i);
     }
   }
-  return { norm: out.join(''), map };
+  const norm = out.join('');
+  return withMap ? { norm, map } : norm;
 }
 
 /**
- * Plain normalized form (no offset map) — for presence checks. Mapless fast
- * path: native replaces, no per-char array churn (a triage-gate or map-block
- * check over an MB transcript must not allocate an 8-byte-per-char map it
- * throws away). Parity with normalizeForGrounding().norm is pinned by test.
+ * Plain normalized form (no offset map) — for presence checks (the triage
+ * rescue's segment verification, buildTriageMapBlock's quote filter, the
+ * numeric-claim scan). Same fold as normalizeForGrounding by construction;
+ * skips only the offset-map allocation.
  */
 export function normForGrounding(s: string): string {
-  return s
-    .replace(/[‘’ʼ]/g, "'")
-    .replace(/[“”]/g, '"')
-    .replace(/[–—−]/g, '-')
-    .toLowerCase()
-    .replace(/\s+/g, ' ')
-    .trim();
+  return foldForGrounding(s, false) as string;
 }
 
 interface GroundedTranscript {
@@ -357,7 +373,12 @@ export function groundQuote(inner: string, t: GroundedTranscript): GroundResult 
  * thousands of times for warn-only telemetry).
  */
 export function countUngroundedNumericClaims(body: string, t: GroundedTranscript): number {
-  const masked = body.replace(/```[\s\S]*?(?:```|$)/g, ' ').replace(/`[^`\n]*`/g, ' ');
+  // Same mask as quote extraction — wikilinks and link targets included:
+  // dream pages MUST carry wikilinks, and slugs embed dates/ids
+  // (`meetings/2026-08-30`, `…-a1b2c3`) that would otherwise register as
+  // structurally-ungroundable "claims" and inflate the very baseline the
+  // filed grounding-gate follow-up (E7) would threshold on.
+  const masked = maskNonProse(body);
   const claimRe = /\$[\d,]+(?:\.\d+)?[kmbKMB]?|\b\d+(?:\.\d+)?%|\b\d{4}-\d{2}-\d{2}\b|\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]* \d{1,2}\b|\b\d{4,}\b/gi;
   let warns = 0;
   const seen = new Set<string>();
@@ -403,7 +424,14 @@ export function repairBody(body: string, t: GroundedTranscript): {
     if (g.status === 'exact') { exact++; continue; }
     if (g.status === 'normalized' || g.status === 'near') {
       if (g.status === 'normalized') normalized++; else near++;
-      out = out.slice(0, sp.start + 1) + g.replacement + out.slice(sp.end);
+      // Collapse interior newline runs to a single space: the match was found
+      // under a normalization that folds ALL whitespace, so this is
+      // equivalent text — but splicing a transcript line break inside a
+      // quoted span would split the markdown paragraph and leave the opening
+      // and closing marks in different paragraphs (permanently unverifiable
+      // on any later pass).
+      const flat = g.replacement.replace(/\s*\n\s*/g, ' ');
+      out = out.slice(0, sp.start + 1) + flat + out.slice(sp.end);
       continue;
     }
     // Strip: drop the enclosing quote marks, keep the text — an honest

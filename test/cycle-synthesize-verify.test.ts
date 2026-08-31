@@ -168,8 +168,29 @@ describe('repairBody', () => {
   });
 });
 
+describe('repairBody — replacement hygiene (red-team regression)', () => {
+  test('a multi-line transcript match splices as ONE line (quote marks stay in one paragraph)', () => {
+    const transcript = 'user: We agreed the launch moves\nto March 14th because\nthe audit slipped.';
+    const t = grounded(transcript);
+    const body = 'Decision: "We agreed the launch moves to March 14th because the audit slipped."';
+    const r = repairBody(body, t);
+    expect(r.normalized).toBe(1);
+    expect(r.body).not.toContain('\n'); // no line break spliced inside the quote
+    expect(r.body).toContain('"We agreed the launch moves to March 14th because the audit slipped."');
+    // Re-verifying the repaired body is stable (the marks still pair).
+    const again = repairBody(r.body, t);
+    expect(again.unbalanced).toBe(0);
+    expect(again.stripped).toBe(0);
+  });
+});
+
 describe('countUngroundedNumericClaims (F4b, warn-only)', () => {
   const t = grounded('user: ARR hit $2M in January 2026, churn 5%, headcount 12.');
+
+  test('wikilinks and link targets are masked — dated slugs are not "claims" (red-team regression)', () => {
+    const body = 'See [[meetings/2026-08-30-board]] and [the note](wiki/personal/reflections/2026-08-31-topic-a1b2c3). ARR reached $2M.';
+    expect(countUngroundedNumericClaims(body, t)).toBe(0);
+  });
 
   test('grounded claims do not warn; invented ones do; fences skipped; deduped', () => {
     const body = [
@@ -240,16 +261,21 @@ describe('normalizeForGrounding — multi-code-unit case folding (security-revie
     }
   });
 
-  test('normForGrounding (mapless fast path) parity with normalizeForGrounding().norm', () => {
+  test('normForGrounding (mapless) is parity with normalizeForGrounding().norm — including the cases a whole-string toLowerCase got wrong', () => {
     const cases = [
       'He said  “We’re    NOT\n\nready — at all.”',
       'İstanbul – café ʼn “mixed” ‘quotes’ \t\t tabs',
+      'ΟΔΟΣ ΟΔΟΣ',            // Greek final sigma: whole-string lowercase → 'ς', per-char → 'σ'
+      '𐐀𐐁 DESERET',           // non-BMP: surrogate pairs lowercase as pairs, never half by half
       '  leading and trailing   ',
       'plain ascii already normalized',
       '',
     ];
     for (const c of cases) {
       expect(normForGrounding(c)).toBe(normalizeForGrounding(c).norm);
+      // The map invariant holds for every case too.
+      const m = normalizeForGrounding(c);
+      expect(m.map.length).toBe(m.norm.length);
     }
   });
 });
