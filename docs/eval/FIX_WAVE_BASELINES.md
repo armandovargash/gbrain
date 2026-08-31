@@ -35,19 +35,29 @@ by two paid runs at the sonnet judge:
   hallucination 14.0%, emission **16/20** (same four triage misses, scores
   0.32–0.42 — the F2 rescue band), facts lane 58.6%. Receipt archived at
   `~/gbrain-cat35-receipts/phase0-baseline-aa820c7f.json` (operator machine).
-- **Post-wave run (Phase 7, RC 1ee7db52, gates PASS, $6.39):** dream salient
-  recall **80.5%** [68.9–89.7] (+10.3pp vs Phase 0; strict 74.0%), emission
-  **20/20** (all four Phase-0 misses converted — three via the verified-segment
-  rescue at scores 0.38/0.42/0.42, one via rubric v2 at 0.52; pure-routine
-  stayed 0.15/zero pages — no false fires), quote fidelity **84.6%** (137/162;
-  ungrounded quoted spans 110 → 25 — the escape hatch also cut fake quoting),
-  hallucination **8.8%** (55/627 — fewer ungrounded claims over MORE verifiable
-  claims, F3's density), dream leakage **0%**, facts lane **64.6%** (+6.0pp;
-  idea-kind 51.7% vs the published 38.3%), per-kind dream: fact 77.0 / decision
-  83.0 / idea 78.3 / entity 90.0 / vibe 80.4 (every kind up). Judge ceiling
-  92.2% (stable — runs comparable); 100 item flips vs the committed receipt.
-  Receipt: `~/gbrain-cat35-receipts/phase7-wave-1ee7db52.json` (operator
-  machine); republished via the gbrain-evals companion PR.
+- **Post-wave run (final, RC 079941d2 after the ship-review fixes; gates PASS,
+  $6.36, 35 min):** dream salient recall **88.1%** [82.0-93.5] (+17.9pp vs the
+  Phase-0 baseline; strict 82.1%), emission **20/20** — and this run is the
+  cleanest proof of the rescue: ALL FOUR previously-missed transcripts scored
+  BELOW the 0.5 gate (0.45 / 0.35 / 0.42 / 0.42) and still emitted, while
+  pure-routine controls stayed at zero pages (no false fires). Quote fidelity
+  **82.7%** (115/139 vs 130/240 = 54.2% at baseline), hallucination **7.0%**
+  (45/645, halved from 14.0%), facts lane **64.8%** (+6.2pp; idea-kind 50.0%
+  vs the published 38.3%), usability 41.9% (from 36%). Per-kind dream, every
+  kind up sharply: fact 86.1 (from 64.8) / decision 88.6 / idea 86.7 / entity
+  95.0 / vibe 87.5. Judge ceiling 93.0% (stable — runs comparable); 95 item
+  flips. Dream distractor leakage 1.2% (1 item) — the Phase-0 baseline also
+  measured 1.2% and the intermediate run 0%, so this is single-item run-to-run
+  noise, not a rescue cost. Receipt:
+  `~/gbrain-cat35-receipts/phase7b-final-079941d2.json` (operator machine).
+  An intermediate run at 1ee7db52 (pre-review-fixes) measured dream 80.5% /
+  quotes 84.6%; the +7.6pp between them is the quote-span and offset-map fixes
+  the ship review caught. Two commits land after the measured SHA
+  (docs/TODOs/manifest + the inline-drain phase tag, normalizer code-point
+  parity, newline-collapse, mask reuse); all are measurement-neutral on this
+  corpus — the scorer normalizes whitespace on both sides (`normalizeWs` in
+  cat35-checks.ts), the parity change only moves Greek final-sigma/non-BMP
+  folding, and the rest is telemetry.
 
 In-repo gates at the wave head: verify 54/54; BrainBench compare **PASS
 (same-hash)** — kta 0/149 on all three seams, push recall/precision and
