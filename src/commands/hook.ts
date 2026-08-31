@@ -1622,6 +1622,28 @@ async function hookSessionEnd(io: HookIo): Promise<number> {
               secret_scan_ok: redactionsN !== undefined,
             });
           }
+          // Optional Memorable relay — OFF unless config carries the literal
+          // `integrations.memorable.enabled: true` (fail-closed), with the
+          // GBRAIN_MEMORABLE kill switch above. Fire-and-forget detached spawn of
+          // the locally-installed `memorable` CLI (same pattern as
+          // spawnDetachedPush): the child reads THIS receipt and does its own
+          // consent/toggle checks; gbrain never blocks on it, never fails on
+          // it, and sends nothing off-machine itself.
+          try {
+            if (memorableAllowed) {
+              const child = spawn('memorable', ['record', '--session', sessionId], {
+                detached: true,
+                stdio: 'ignore',
+              });
+              // A missing executable surfaces as an ASYNC 'error' event, not a
+              // synchronous throw — without this handler the whole session-end
+              // hook process dies on uncaught ENOENT when the CLI is absent.
+              child.on('error', () => { /* best-effort by contract */ });
+              child.unref();
+            }
+          } catch {
+            /* CLI not installed or spawn refused — the relay is best-effort */
+          }
           try {
             rmSync(corpusFile + CORPUS_INGESTED_SUFFIX, { force: true });
           } catch {

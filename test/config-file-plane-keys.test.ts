@@ -204,6 +204,67 @@ const GATEWAY_MAPPED_KEYS = [
   'google_api_key',
 ] as const;
 
+describe('config set — integrations.memorable.enabled (file plane, three-part key)', () => {
+  test('set true lands NESTED and reads back as the literal boolean the hook gate tests for', async () => {
+    const parent = mkdtempSync(join(tmpdir(), 'gb-cfg-integrations-'));
+    await withEnv({ GBRAIN_HOME: parent }, async () => {
+      const out = await captureLog(() => runConfig(noEngine, ['set', 'integrations.memorable.enabled', 'true']));
+      expect(out).toContain('Set integrations.memorable.enabled = true');
+      expect(out).toContain('file plane');
+      const cfgPath = join(parent, '.gbrain', 'config.json');
+      const cfg = JSON.parse(readFileSync(cfgPath, 'utf8')) as { integrations?: { memorable?: { enabled?: unknown } } };
+      // Nested, not a flat dotted key, and a real boolean — the session-end
+      // gate is `=== true`, so a string here would read as OFF.
+      expect(cfg.integrations?.memorable?.enabled).toBe(true);
+    });
+  });
+
+  test('every off-ish spelling writes literal false; the enable banner shows only when it turns on', async () => {
+    const parent = mkdtempSync(join(tmpdir(), 'gb-cfg-integrations-off-'));
+    await withEnv({ GBRAIN_HOME: parent }, async () => {
+      const cfgPath = join(parent, '.gbrain', 'config.json');
+      const read = () =>
+        (JSON.parse(readFileSync(cfgPath, 'utf8')) as { integrations?: { memorable?: { enabled?: unknown } } })
+          .integrations?.memorable?.enabled;
+
+      const on = await captureLog(() => runConfig(noEngine, ['set', 'integrations.memorable.enabled', 'true']));
+      // The enable banner names BOTH off switches, spellings included — the
+      // env one is documented nowhere else in gbrain's own output.
+      expect(on).toContain('Turn off:');
+      expect(on).toContain('GBRAIN_MEMORABLE=0');
+      expect(on).toContain('false/off/no');
+
+      for (const spelling of ['false', 'off', 'no', '0', 'nonsense']) {
+        const out = await captureLog(() => runConfig(noEngine, ['set', 'integrations.memorable.enabled', spelling]));
+        expect(out).toContain('= false');
+        expect(out).not.toContain('Turn off:');
+        expect(read()).toBe(false);
+      }
+    });
+  });
+
+  test('unset drops the whole memorable branch, which reads as off (fail-closed)', async () => {
+    const parent = mkdtempSync(join(tmpdir(), 'gb-cfg-integrations-unset-'));
+    await withEnv({ GBRAIN_HOME: parent }, async () => {
+      await captureLog(() => runConfig(noEngine, ['set', 'integrations.memorable.enabled', 'true']));
+      const out = await captureLog(() => runConfig(noEngine, ['unset', 'integrations.memorable.enabled']));
+      expect(out).toContain('Unset integrations.memorable.enabled (file plane)');
+      const cfgPath = join(parent, '.gbrain', 'config.json');
+      const cfg = JSON.parse(readFileSync(cfgPath, 'utf8')) as { integrations?: { memorable?: unknown } };
+      // The unset lane destructures a TWO-part key, so a three-part key drops
+      // its middle branch whole. Pinned deliberately: absent reads as off, so
+      // this is fail-closed, and a leaf-precise unset would be a real design
+      // change rather than a silent one.
+      expect(cfg.integrations?.memorable).toBeUndefined();
+    });
+  });
+
+  test('the key is registered in KNOWN_CONFIG_KEYS, so `config get` does not report it unknown', async () => {
+    const { KNOWN_CONFIG_KEYS } = await import('../src/core/config.ts');
+    expect(KNOWN_CONFIG_KEYS).toContain('integrations.memorable.enabled');
+  });
+});
+
 describe('config set — vendor API keys are FILE-plane canonical', () => {
   test('openai_api_key lands in config.json, is redacted in output, and never touches the engine', async () => {
     const parent = mkdtempSync(join(tmpdir(), 'gb-cfg-apikey-'));
