@@ -73,7 +73,7 @@ test/cycle-abort.test.ts	#4077 — synthesize/patterns cooperative-abort threadi
 test/cycle-abort.test.ts	CycleOpts.signal contract (v0.20.5)	4	readFileSync
 test/cycle-abort.test.ts	autopilot-cycle handler contract (v0.20.5)	3	readFileSync
 test/cycle-drain-renewal.test.ts	db-lock heartbeat wiring (structural — issue #6 cancellation)	1	readFileSync
-test/cycle-drain-renewal.test.ts	drain-loop wiring (structural — the shape guard only covers worker.ts)	1	readFileSync
+test/cycle-drain-renewal.test.ts	drain-loop wiring (structural — the shape guard only covers worker.ts)	2	readFileSync
 test/cycle-pack-gating.test.ts	#2117: pack-gated skip summaries are actionable	2	readFileSync
 test/cycle-pack-gating.test.ts	v0.41 T9 R-GATE: NEEDS_LOCK_PHASES contract (source-shape)	2	readFileSync
 test/cycle-pack-gating.test.ts	v0.41 T9 R-GATE: dispatch result envelope	2	readFileSync

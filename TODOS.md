@@ -38,6 +38,27 @@
   cache-cold, hybrid.ts skipCache); (c) widen AdaptiveQueryIntent with
   'concept' (drop the hybrid.ts:2141 coercion). **Why:** prerequisite for the
   cross-surface ablation + any default flip (TODOS v0.41.33.0 section).
+- [ ] **P3 — E8: quote-verify coverage is partial on the agentic fallback path.**
+  **What:** the verify pass scopes to pages whose slug carries the transcript's
+  hash6 (`ref.slug.includes('-' + hash6)`), but that suffix is enforced
+  fail-closed only in ONESHOT mode (subagent-oneshot.ts `oneshot_slug_suffix`
+  check). An agentic-fallback child that drops the suffix creates a page the
+  verify pass skips and mislabels `skipped_preexisting` — coverage is silently
+  thinnest on the path most likely to produce sloppy output. **How:** enforce
+  the suffix server-side in the subagent put_page tool for agentic children
+  too, or at minimum split a `skipped_unbound_new_page` counter with a stderr
+  warn so the gap is observable. **From:** eval fix wave red-team review.
+- [ ] **P3 — E9: no retrofit path for unverified dream pages.**
+  **What:** quote verify only covers the CURRENT run's writtenRefs. A crash or
+  abort between child completion and the verify pass strands pages with
+  unrepaired quotes forever — and the TRIAGE_VERSION 2 bump widens the window
+  (a transcript whose children completed under v1 may re-judge below the gate
+  under v2 and never re-enter the fan-out). **How:** an operator command
+  (`gbrain dream verify --recheck`) over `frontmatter->>'dream_generated'`
+  pages matched to transcripts by raw_source/hash6, or a per-page verified
+  marker in the provenance stamp so a later cycle can find and repair them
+  regardless of the gate's current verdict. **From:** eval fix wave red-team
+  review.
 - [ ] **P3 — E7: LLM grounding judge on dream pages (TRUSTMEM-style).**
   **What:** an opt-in verify pass that judges every dream-page claim against
   its source transcript (coverage/preservation/faithfulness), beyond the
