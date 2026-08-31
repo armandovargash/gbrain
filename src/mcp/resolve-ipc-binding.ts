@@ -170,7 +170,13 @@ export async function bindResolveIpcForServe(
         // at DELIVERY (post-write), not inside the resolver — a block the
         // client's 250ms budget abandoned was never injected, and counting it
         // would corrupt the volunteered-vs-used precision stats (red-team).
-        onDelivered: (block) => logDeliveredReflexPointers(engine, block.pointers),
+        // Volunteer-stage PROBE resolves (wide ungated pool) are skipped for
+        // the same reason: the pool is not injected pointers; the client logs
+        // gated survivors through the volunteer-events sink (2026-08 wave).
+        onDelivered: (block, req) => {
+          if (req?.probe === 'volunteer') return;
+          logDeliveredReflexPointers(engine, block.pointers);
+        },
         // The hook lane's feedback loop (#2095 closed over turn_context):
         // the delivered block's post-trim volunteered pages + pointers land
         // in context_volunteer_events under the request's channel. Body
