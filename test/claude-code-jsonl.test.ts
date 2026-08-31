@@ -17,6 +17,7 @@ import {
   SPEC_TARGET,
   toCorpusText,
   TRANSCRIPT_HARD_CAP_BYTES,
+  TOOL_CALL_VALUE_MAX_CHARS,
   TRANSCRIPT_MAX_BYTES_DEFAULT,
 } from '../src/core/transcripts/claude-code-jsonl.ts';
 
@@ -359,5 +360,148 @@ describe('confineTranscriptPath — cross-OS WSL translation (#4522)', () => {
       wslMountRoot: mountRoot,
     });
     expect(r).toEqual({ ok: false, reason: 'symlink' });
+  });
+});
+
+describe('parseTranscript toolCalls — real args + outcome join', () => {
+  // Collection is opt-in and OFF by default (pinned below); the session-end
+  // lane is the only caller that asks for it.
+  const parse = (path: string) => parseTranscript(path, { collectToolCalls: true });
+  function write(lines: unknown[]): string {
+    const d = tdir();
+    const p = join(d, 'session.jsonl');
+    writeFileSync(p, lines.map((l) => JSON.stringify(l)).join('\n') + '\n');
+    return p;
+  }
+  const call = (id: string, name: string, input: unknown) => ({
+    type: 'assistant',
+    message: { role: 'assistant', content: [{ type: 'tool_use', id, name, input }] },
+  });
+  const result = (tool_use_id: string, is_error?: boolean) => ({
+    type: 'user',
+    message: {
+      role: 'user',
+      content: [{ type: 'tool_result', tool_use_id, ...(is_error === undefined ? {} : { is_error }), content: 'x' }],
+    },
+  });
+
+  test('the fixture yields the real tool name + input, and the turns still carry only the placeholder', () => {
+    const r = parse(FIXTURE);
+    expect(r.toolCalls).toHaveLength(1);
+    expect(r.toolCalls[0].name).toBe('search_brain');
+    expect(r.toolCalls[0].input).toMatchObject({ query: expect.any(String) });
+    // The corpus path is unchanged: entryToTurn still renders a placeholder,
+    // so nothing about the ambient-recall token budget moved.
+    expect(toCorpusText(r.turns)).toContain('[tool: search_brain]');
+    expect(toCorpusText(r.turns)).not.toContain('acme-example connections search argument');
+  });
+
+  test('a result in a LATER line joins to its call by tool_use_id', () => {
+    const r = parse(write([call('tu-1', 'Bash', { command: 'pytest' }), result('tu-1')]));
+    expect(r.toolCalls).toEqual([{ name: 'Bash', input: { command: 'pytest' }, result: { ok: true } }]);
+  });
+
+  test('is_error:true is the only thing that makes ok false', () => {
+    const r = parse(
+      write([call('a', 'Bash', 1), result('a', true), call('b', 'Bash', 2), result('b', false)]),
+    );
+    expect(r.toolCalls.map((c) => c.result)).toEqual([{ ok: false }, { ok: true }]);
+  });
+
+  test('a call with no result gets no result field, and an orphan result is dropped', () => {
+    const r = parse(write([call('tu-1', 'Read', { path: '/x' }), result('tu-other')]));
+    expect(r.toolCalls).toEqual([{ name: 'Read', input: { path: '/x' } }]);
+  });
+
+  test('the transcript-internal tool_use id never reaches the public record', () => {
+    const r = parse(write([call('tu-secret', 'Bash', { command: 'ls' }), result('tu-secret')]));
+    expect(JSON.stringify(r.toolCalls)).not.toContain('tu-secret');
+    expect(Object.keys(r.toolCalls[0])).toEqual(['name', 'input', 'result']);
+  });
+
+  test('sidechain tool calls are skipped, exactly as sidechain turns are', () => {
+    const side = { ...call('tu-s', 'Bash', { command: 'rm -rf /' }), isSidechain: true };
+    const r = parse(write([side, call('tu-m', 'Bash', { command: 'ls' })]));
+    expect(r.toolCalls.map((c) => c.name)).toEqual(['Bash']);
+    expect(r.toolCalls[0].input).toEqual({ command: 'ls' });
+  });
+
+  test('calls keep transcript order, and a missing input reads as null rather than absent', () => {
+    const r = parse(write([call('1', 'first', undefined), call('2', 'second', { a: 1 })]));
+    expect(r.toolCalls.map((c) => c.name)).toEqual(['first', 'second']);
+    expect(r.toolCalls[0].input).toBeNull();
+  });
+
+  test('a transcript with no tool calls yields an empty array, never undefined', () => {
+    const r = parse(write([{ type: 'user', message: { role: 'user', content: 'hello' } }]));
+    expect(r.toolCalls).toEqual([]);
+  });
+
+  test('collection is OFF unless the caller asks: the default parse costs a brain that never opted in nothing', () => {
+    const p = write([call('tu-1', 'Bash', { command: 'certbot renew' }), result('tu-1')]);
+    // The per-prompt lane parses this way, in front of every prompt.
+    const off = parseTranscript(p);
+    expect(off.toolCalls).toEqual([]);
+    expect(JSON.stringify(off.toolCalls)).not.toContain('certbot');
+    // Explicit false reads the same as absent.
+    expect(parseTranscript(p, { collectToolCalls: false }).toolCalls).toEqual([]);
+    // Everything else the existing callers read is byte-identical either way.
+    expect(off.turns).toEqual(parse(p).turns);
+    expect(off.bytesRead).toBe(parse(p).bytesRead);
+    expect(off.boundaryTurnIndexes).toEqual(parse(p).boundaryTurnIndexes);
+  });
+});
+
+describe('parseTranscript toolCalls — the record is bounded', () => {
+  // Collection is opt-in and OFF by default (pinned below); the session-end
+  // lane is the only caller that asks for it.
+  const parse = (path: string) => parseTranscript(path, { collectToolCalls: true });
+
+  test('a file body in a tool input is capped with an explicit omission marker, and a real command is untouched', () => {
+    const d = tdir();
+    const p = join(d, 'big.jsonl');
+    const body = 'A'.repeat(TOOL_CALL_VALUE_MAX_CHARS + 5_000);
+    writeFileSync(
+      p,
+      [
+        JSON.stringify({
+          type: 'assistant',
+          message: {
+            role: 'assistant',
+            content: [
+              { type: 'tool_use', id: 'w', name: 'Write', input: { file_path: '/repo/blob.txt', content: body } },
+              { type: 'tool_use', id: 'b', name: 'Bash', input: { command: 'pytest -q tests/' } },
+            ],
+          },
+        }),
+      ].join('\n') + '\n',
+    );
+    const r = parse(p);
+    const write = r.toolCalls[0].input as { file_path: string; content: string };
+    expect(write.file_path).toBe('/repo/blob.txt');
+    expect(write.content.startsWith('A'.repeat(TOOL_CALL_VALUE_MAX_CHARS))).toBe(true);
+    expect(write.content).toContain('[5000 chars omitted]');
+    expect(write.content.length).toBeLessThan(TOOL_CALL_VALUE_MAX_CHARS + 100);
+    // The sibling command is a fact, and facts are never rewritten.
+    expect((r.toolCalls[1].input as { command: string }).command).toBe('pytest -q tests/');
+  });
+
+  test('the cap reaches strings nested in arrays and objects', () => {
+    const d = tdir();
+    const p = join(d, 'nested.jsonl');
+    const body = 'B'.repeat(TOOL_CALL_VALUE_MAX_CHARS + 1);
+    writeFileSync(
+      p,
+      JSON.stringify({
+        type: 'assistant',
+        message: {
+          role: 'assistant',
+          content: [{ type: 'tool_use', id: 'e', name: 'MultiEdit', input: { edits: [{ new_string: body }] } }],
+        },
+      }) + '\n',
+    );
+    const r = parse(p);
+    const edits = (r.toolCalls[0].input as { edits: Array<{ new_string: string }> }).edits;
+    expect(edits[0].new_string).toContain('[1 chars omitted]');
   });
 });

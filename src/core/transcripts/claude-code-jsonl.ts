@@ -199,6 +199,19 @@ export interface ParsedTranscript {
    * count equality). Always same length as `compactBoundaries`.
    */
   boundaryTurnIndexes: number[];
+  /**
+   * Additive (memorable integration): the tool name + raw input args for every
+   * tool_use block, oldest → newest — the actual command/arguments entryToTurn
+   * deliberately discards down to a bare `[tool: name]` placeholder for the
+   * token-budget-constrained ambient-recall path. Does not change `turns` or
+   * any existing field; existing callers that don't read this field see no
+   * behavior change.
+   *
+   * ALWAYS `[]` unless the caller asks with `collectToolCalls: true`. The
+   * per-prompt lane never asks, so a brain that has not opted in does no
+   * scanning, allocates nothing extra, and parses in the time it always did.
+   */
+  toolCalls: ToolCallRecord[];
 }
 
 /**
@@ -209,8 +222,15 @@ export interface ParsedTranscript {
  */
 export function parseTranscript(
   path: string,
-  opts: { maxBytes?: number } = {},
+  opts: { maxBytes?: number; collectToolCalls?: boolean } = {},
 ): ParsedTranscript {
+  // Opt-in, and default OFF, because this is the only lane where a caller
+  // pays for something it does not read. The UserPromptSubmit lane parses up
+  // to 2MB in front of every prompt; collecting and copying tool inputs there
+  // for a consumer that may not exist is work charged to a brain that never
+  // turned the integration on. Measured on a 2MB transcript: 7.6ms -> 12.0ms
+  // median with collection on.
+  const collectToolCalls = opts.collectToolCalls === true;
   const maxBytes = Math.max(1, Math.floor(opts.maxBytes ?? TRANSCRIPT_MAX_BYTES_DEFAULT));
   const size = statSync(path).size;
 
@@ -237,6 +257,8 @@ export function parseTranscript(
   const turns: WindowTurn[] = [];
   const injectedContextBlocks: string[] = [];
   const boundaryTurnIndexes: number[] = [];
+  const toolCalls: ToolCallWithId[] = [];
+  const toolResults = new Map<string, boolean>();
   let parsedLines = 0;
   let skippedLines = 0;
   let compactBoundaries = 0;
@@ -265,10 +287,21 @@ export function parseTranscript(
       injectedContextBlocks.push(injected);
       continue;
     }
+    if (collectToolCalls) {
+      toolCalls.push(...entryToToolCalls(entry));
+      for (const r of entryToToolResults(entry)) toolResults.set(r.tool_use_id, r.ok);
+    }
     const turn = entryToTurn(entry);
     if (turn) turns.push(turn);
   }
-  return { turns, injectedContextBlocks, bytesRead, parsedLines, skippedLines, compactBoundaries, boundaryTurnIndexes };
+  // Join results to calls by tool_use_id, then strip the internal id field so
+  // the public ToolCallRecord shape (and the receipt JSON derived from it)
+  // stays free of transcript-internal identifiers.
+  const joinedToolCalls: ToolCallRecord[] = toolCalls.map((c) => {
+    const ok = c.id !== undefined ? toolResults.get(c.id) : undefined;
+    return { name: c.name, input: capToolInput(c.input), ...(ok !== undefined ? { result: { ok } } : {}) };
+  });
+  return { turns, injectedContextBlocks, bytesRead, parsedLines, skippedLines, compactBoundaries, boundaryTurnIndexes, toolCalls: joinedToolCalls };
 }
 
 /** {type:'system', subtype:'compact_boundary'} — Claude Code's on-disk compaction marker (v0.45.7). */
@@ -361,6 +394,97 @@ function entryToTurn(entry: unknown): WindowTurn | null {
   text = text.trim();
   if (!text) return null;
   return { role, text };
+}
+
+/**
+ * Additive (memorable integration): the tool name + raw input args for every
+ * tool_use block in one entry, in content-array order. Deliberately parallel
+ * to entryToTurn rather than a change to it — entryToTurn's placeholder-only
+ * rendering is load-bearing for the token-budget-constrained ambient-recall
+ * path and must not change. This is for a session-end-only consumer that
+ * wants the actual command, not a summary of the fact that one ran.
+ */
+export interface ToolCallRecord {
+  name: string;
+  input: unknown;
+  /**
+   * Structured outcome, joined from the matching tool_result block by
+   * tool_use_id after the full parse (a result arrives in a LATER transcript
+   * line than its call). `ok` is `is_error !== true` on the result block.
+   * Absent when no matching result block was seen in the read window.
+   */
+  result?: { ok: boolean };
+}
+
+/** Internal parse shape: carries the tool_use id so results can be joined after the scan. */
+interface ToolCallWithId extends ToolCallRecord {
+  id?: string;
+}
+
+/**
+ * No real command, path or argument runs this long — anything bigger is a file
+ * BODY (a Write's `content`, a pasted blob). entryToTurn discards those
+ * outright, and this record must not be the way they come back: a single 4MB
+ * write otherwise produced a 98-byte corpus file and a 4MB receipt line.
+ * Longer values are kept as a prefix with an explicit omission marker, so a
+ * consumer can never mistake a truncated body for a whole one.
+ */
+export const TOOL_CALL_VALUE_MAX_CHARS = 32_000;
+
+const TOOL_CALL_MAX_DEPTH = 8;
+
+function capToolInput(value: unknown, depth = 0): unknown {
+  if (typeof value === 'string') {
+    if (value.length <= TOOL_CALL_VALUE_MAX_CHARS) return value;
+    return `${value.slice(0, TOOL_CALL_VALUE_MAX_CHARS)}\u2026[${value.length - TOOL_CALL_VALUE_MAX_CHARS} chars omitted]`;
+  }
+  if (depth >= TOOL_CALL_MAX_DEPTH) return null;
+  if (Array.isArray(value)) return value.map((v) => capToolInput(v, depth + 1));
+  if (value !== null && typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) out[k] = capToolInput(v, depth + 1);
+    return out;
+  }
+  return value;
+}
+
+function entryToToolCalls(entry: unknown): ToolCallWithId[] {
+  if (typeof entry !== 'object' || entry === null) return [];
+  const e = entry as Record<string, unknown>;
+  if (e.isSidechain === true) return []; // subagent traffic — skipped, same as entryToTurn
+  const msg = e.message;
+  if (typeof msg !== 'object' || msg === null) return [];
+  const content = (msg as Record<string, unknown>).content;
+  if (!Array.isArray(content)) return [];
+  const calls: ToolCallWithId[] = [];
+  for (const block of content) {
+    if (typeof block !== 'object' || block === null) continue;
+    const b = block as Record<string, unknown>;
+    if (b.type === 'tool_use' && typeof b.name === 'string' && b.name) {
+      calls.push({ name: b.name, input: b.input ?? null, ...(typeof b.id === 'string' ? { id: b.id } : {}) });
+    }
+  }
+  return calls;
+}
+
+/** tool_result blocks in one entry → [{tool_use_id, ok}]. `ok` is `is_error !== true`. */
+function entryToToolResults(entry: unknown): Array<{ tool_use_id: string; ok: boolean }> {
+  if (typeof entry !== 'object' || entry === null) return [];
+  const e = entry as Record<string, unknown>;
+  if (e.isSidechain === true) return [];
+  const msg = e.message;
+  if (typeof msg !== 'object' || msg === null) return [];
+  const content = (msg as Record<string, unknown>).content;
+  if (!Array.isArray(content)) return [];
+  const out: Array<{ tool_use_id: string; ok: boolean }> = [];
+  for (const block of content) {
+    if (typeof block !== 'object' || block === null) continue;
+    const b = block as Record<string, unknown>;
+    if (b.type === 'tool_result' && typeof b.tool_use_id === 'string') {
+      out.push({ tool_use_id: b.tool_use_id, ok: b.is_error !== true });
+    }
+  }
+  return out;
 }
 
 // ── Session parse for the import lane (cathedral-4, ADDITIVE) ───────────────
