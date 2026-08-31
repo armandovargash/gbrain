@@ -196,6 +196,20 @@ describe('remember — contract behavior', () => {
     expect(kindEnum).not.toContain('idea');
   });
 
+  it("recall's RESPONSE kind enum admits 'idea' — the reader must not be told a lie", () => {
+    // The INPUT freeze above is the protocol contract (a caller cannot WRITE
+    // an idea through the verb). The response side describes what the system
+    // actually RETURNS: the extractor and the facts table carry 'idea', so a
+    // stored idea fact flows back through recall. A response schema omitting
+    // it would declare a contract the system itself violates. Widening a
+    // response enum is strictly permissive for consumers.
+    const src = readFileSync(new URL('../src/core/verbs.ts', import.meta.url), 'utf-8');
+    expect(src).toContain("FACT_KINDS_RESPONSE = [...FACT_KINDS, 'idea']");
+    expect(src).toContain("kind: { type: 'string', enum: FACT_KINDS_RESPONSE as unknown as string[] }");
+    // ...and the input enum still reads from the frozen constant.
+    expect(src).toContain('enum: [...FACT_KINDS],');
+  });
+
   it('rejects empty provenance with provenance_required + a populated suggestion', async () => {
     const { isError, body } = await callRemote('remember', { fact: 'x', provenance: '   ' });
     expect(isError).toBe(true);

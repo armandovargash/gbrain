@@ -63,8 +63,9 @@ previously-skipped sessions now produces pages, and quote fidelity went from
    broke. This feedback loop is how the maintainers find fragile upgrade paths.
    Thank you.
 
-**Say to your agent:** *"distill my recent sessions into brain pages"* — *"what
-did I decide in that session last week?"* — *"remember this idea"*
+**Say to your agent:** *"synthesize my conversations"* / *"process yesterday's
+transcripts"* — *"re-score the triage"* / *"retriage the backlog"* — *"what do
+we know about"* the topic you worked through, to read the page back.
 
 ### What you would see in a concrete example
 
