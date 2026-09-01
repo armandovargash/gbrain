@@ -186,9 +186,6 @@ export async function resolveCodeReadiness(
     remote?: boolean;
   } & ReadinessScope,
 ): Promise<CodeGraphReadiness> {
-  if (opts.kind === 'edge' && (opts.unresolvedCount ?? 0) > 0) {
-    return { status: 'indexing', ready: false, has_code: true, pending_edges: true };
-  }
   if (opts.kind === 'symbol' && opts.count > 0) {
     return { status: 'ready', ready: true, has_code: true, pending_edges: false };
   }
