@@ -171,6 +171,8 @@ export async function resolveCodeReadiness(
   opts: {
     kind: 'symbol' | 'edge';
     count: number;
+    /** Returned call edges that still lack a resolved target. */
+    unresolvedCount?: number;
     /**
      * #4352 remediation: trust gate for the #3707 out_of_scope brain-wide
      * rerun. Pass `ctx.remote` (ops) or `false` (local CLI commands).
@@ -181,6 +183,9 @@ export async function resolveCodeReadiness(
     remote?: boolean;
   } & ReadinessScope,
 ): Promise<CodeGraphReadiness> {
+  if (opts.kind === 'edge' && (opts.unresolvedCount ?? 0) > 0) {
+    return { status: 'indexing', ready: false, has_code: true, pending_edges: true };
+  }
   if (opts.count > 0) {
     return { status: 'ready', ready: true, has_code: true, pending_edges: false };
   }
