@@ -113,6 +113,15 @@ describe('resolveCodeReadiness — code synced, edges unresolved', () => {
     expect(r.status).toBe('ready');
     expect(r.ready).toBe(true);
   });
+
+  test('non-empty unresolved results remain indexing', async () => {
+    const r = await resolveCodeReadiness(engine, {
+      kind: 'edge', count: 3, unresolvedCount: 2,
+    });
+    expect(r.status).toBe('indexing');
+    expect(r.ready).toBe(false);
+    expect(r.pending_edges).toBe(true);
+  });
 });
 
 describe('resolveCodeReadiness — code chunks without symbol metadata (#3640)', () => {

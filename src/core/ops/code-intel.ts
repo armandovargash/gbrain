@@ -57,7 +57,9 @@ const code_callers: Operation = {
     const { resolveCodeReadiness } = await import('../code-graph-readiness.ts');
     // #4352: thread trust — the out_of_scope brain-wide rerun is local-only.
     const readiness = await resolveCodeReadiness(ctx.engine, {
-      kind: 'edge', count: edges.length, sourceId, allSources, remote: ctx.remote,
+      kind: 'edge', count: edges.length,
+      unresolvedCount: edges.filter((edge) => !edge.resolved).length,
+      sourceId, allSources, remote: ctx.remote,
     });
     return {
       symbol, count: edges.length, status: readiness.status, ready: readiness.ready,
@@ -94,7 +96,9 @@ const code_callees: Operation = {
     const { resolveCodeReadiness } = await import('../code-graph-readiness.ts');
     // #4352: thread trust — see code_callers.
     const readiness = await resolveCodeReadiness(ctx.engine, {
-      kind: 'edge', count: edges.length, sourceId, allSources, remote: ctx.remote,
+      kind: 'edge', count: edges.length,
+      unresolvedCount: edges.filter((edge) => !edge.resolved).length,
+      sourceId, allSources, remote: ctx.remote,
     });
     return {
       symbol, count: edges.length, status: readiness.status, ready: readiness.ready,
@@ -203,6 +207,7 @@ const code_blast: Operation = {
     const readiness = await resolveCodeReadiness(ctx.engine, {
       kind: walk.result === 'not_found' ? 'symbol' : 'edge',
       count: resultCount,
+      unresolvedCount: walk.result === 'ok' && walk.freshness === 'partial' ? 1 : 0,
       sourceId,
       remote: ctx.remote,
     });
