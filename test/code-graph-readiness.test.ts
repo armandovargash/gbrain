@@ -131,6 +131,16 @@ describe('resolveCodeReadiness — code synced, edges unresolved', () => {
     expect(r.ready).toBe(false);
     expect(r.pending_edges).toBe(true);
   });
+
+  test('processed symbolic edge results become ready once the source watermark is fresh', async () => {
+    await engine.executeRaw('UPDATE content_chunks SET edges_backfilled_at = NOW()');
+    const r = await resolveCodeReadiness(engine, {
+      kind: 'edge', count: 3, unresolvedCount: 2,
+    });
+    expect(r.status).toBe('ready');
+    expect(r.ready).toBe(true);
+    expect(r.pending_edges).toBe(false);
+  });
 });
 
 describe('resolveCodeReadiness — code chunks without symbol metadata (#3640)', () => {
