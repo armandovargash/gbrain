@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 
-import { resolveSingleSourceSyncStrategy } from '../src/commands/sync.ts';
+import { resolveSingleSourceSyncStrategy } from '../src/core/sync-source-strategy.ts';
 
 describe('single-source sync strategy', () => {
   test('inherits the registered code strategy when CLI does not override it', () => {

@@ -18,6 +18,7 @@ import { SLUG_WORD_CHARS } from './cjk.ts';
 import { existsSync, statSync, realpathSync } from 'fs';
 import { join as pathJoin, resolve as pathResolve } from 'path';
 import type { BrainEngine } from './engine.ts';
+export { resolveRegisteredSourceSyncStrategy } from './sync-source-strategy.ts';
 
 export interface SyncManifest {
   added: string[];
