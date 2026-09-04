@@ -26,7 +26,7 @@ describe('#4518: supervisor check under --fast with no default-path pidfile', ()
   test('a cleanly stopped supervisor warns when jobs are waiting', () => {
     const check = classifyCleanSupervisorShutdown('2026-09-04T08:01:00.000Z', 3);
     expect(check.status).toBe('warn');
-    expect(check.message).toContain('3 job(s) are waiting');
+    expect(check.message).toContain('3 job(s) require processing now');
     expect(check.message).toContain('Restart with');
   });
 
@@ -46,7 +46,35 @@ describe('#4518: supervisor check under --fast with no default-path pidfile', ()
   test('a cleanly stopped supervisor is healthy only after proving the queue is empty', () => {
     const check = classifyCleanSupervisorShutdown('2026-09-04T08:01:00.000Z', 0);
     expect(check.status).toBe('ok');
-    expect(check.message).toContain('no waiting jobs');
+    expect(check.message).toContain('no waiting or due-delayed jobs');
+  });
+
+  test('the queue probe counts due delayed jobs as pending work', async () => {
+    const executed: string[] = [];
+    const engine = {
+      kind: 'pglite',
+      executeRaw: async (sql: string) => {
+        executed.push(sql);
+        if (sql.includes('AS pending') && sql.includes('FROM minion_jobs')) {
+          return [{ pending: 1 }];
+        }
+        return [];
+      },
+    } as any;
+
+    await withIsolatedHome(async () => {
+      writeSupervisorEvent({ event: 'started', ts: '2026-09-04T08:00:00.000Z' }, 12345);
+      writeSupervisorEvent({ event: 'shutting_down', ts: '2026-09-04T08:01:00.000Z', reason: 'SIGTERM', exit_code: 0 }, 12345);
+
+      const checks = await buildChecks(engine, ['--scope=brain']);
+      const check = supervisorCheck(checks);
+      expect(check?.status).toBe('warn');
+      expect(check?.message).toContain('1 job(s) require processing now');
+    });
+
+    const queueProbe = executed.find((sql) => sql.includes('AS pending') && sql.includes('FROM minion_jobs'));
+    expect(queueProbe).toContain("status = 'waiting'");
+    expect(queueProbe).toContain("status = 'delayed' AND delay_until <= now()");
   });
 
   test('no supervisor ever observed → no check surfaced at all (unaffected by the fix)', async () => {

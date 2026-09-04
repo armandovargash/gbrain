@@ -121,14 +121,15 @@ describe('extractTakesFromPages — md-first (#4473)', () => {
     expect(existsSync(join(repo, `${slug}.md`))).toBe(false);
   });
 
-  test('dry-run counts claims without touching disk or DB', async () => {
+  test('dry-run counts eligible pages without calling chat or touching disk/DB', async () => {
     const slug = 'concepts/md-first-dry';
     await engine.putPage(slug, { type: 'concept', title: 'Dry', compiled_truth: BODY, frontmatter: {} });
     writeFileSync(join(repo, `${slug}.md`), `# Dry\n\n${BODY}\n`, 'utf-8');
 
     const r = await extractTakesFromPages(engine, { bootstrapEnabled: true, maxPages: 50, dryRun: true });
-    // Dry-run rescans BOTH uncovered pages (db-born included — no file gate on dry-run).
-    expect(r.claims_extracted).toBeGreaterThanOrEqual(1);
+    expect(r.pages_scanned).toBeGreaterThanOrEqual(1);
+    expect(r.claims_extracted).toBe(0);
+    expect(chatCalls).not.toContain(slug);
     const md = readFileSync(join(repo, `${slug}.md`), 'utf-8');
     expect(md).not.toContain('gbrain:takes');
     const rows = await engine.executeRaw<{ n: number }>(

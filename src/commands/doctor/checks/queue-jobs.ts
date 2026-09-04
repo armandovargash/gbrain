@@ -11,10 +11,23 @@ import type { Check } from '../../doctor.ts';
 /** Local alias; the shared warn-once memo lives in core so it can't fork per module. */
 const _resolveEnvNumber = resolveEnvNumber;
 
+/** Count work a stopped supervisor could process immediately. */
+export async function countPendingSupervisorJobs(engine: BrainEngine): Promise<number> {
+  const rows = await engine.executeRaw<{ pending: string | number }>(
+    `SELECT count(*)::int AS pending
+       FROM minion_jobs
+      WHERE status = 'waiting'
+         OR (status = 'delayed' AND delay_until <= now())`,
+  );
+  return Number(rows[0]?.pending ?? 0);
+}
+
 /**
- * A clean supervisor exit is healthy only when the durable queue is known to
- * be empty. Connectionless or failed probes stay advisory rather than turning
- * absence of evidence into a false all-clear.
+ * A clean supervisor exit is healthy only when the durable queue has no work
+ * that can run now. Due delayed jobs are claimable even before a worker has
+ * promoted them back to waiting, so they must keep the check non-green too.
+ * Connectionless or failed probes stay advisory rather than turning absence
+ * of evidence into a false all-clear.
  */
 export function classifyCleanSupervisorShutdown(
   stoppedAt: string,
@@ -24,7 +37,7 @@ export function classifyCleanSupervisorShutdown(
     return {
       name: 'supervisor',
       status: 'warn',
-      message: `Supervisor stopped cleanly at ${stoppedAt}, but ${queueState} job(s) are waiting. Restart with: gbrain jobs supervisor start --detach`,
+      message: `Supervisor stopped cleanly at ${stoppedAt}, but ${queueState} job(s) require processing now. Restart with: gbrain jobs supervisor start --detach`,
     };
   }
   if (queueState === 'unavailable') {
@@ -44,7 +57,7 @@ export function classifyCleanSupervisorShutdown(
   return {
     name: 'supervisor',
     status: 'ok',
-    message: `Supervisor intentionally stopped at ${stoppedAt} (clean shutdown); no waiting jobs require a restart.`,
+    message: `Supervisor intentionally stopped at ${stoppedAt} (clean shutdown); no waiting or due-delayed jobs require a restart.`,
   };
 }
 

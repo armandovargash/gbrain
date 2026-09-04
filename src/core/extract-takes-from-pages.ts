@@ -140,9 +140,13 @@ export async function extractTakesFromPages(
     };
   }
 
-  // Gate the model this extraction will actually call. A task override may be
-  // servable even when the process-wide chat model is not (or vice versa).
-  if (!isAvailable('chat', opts.model)) {
+  const dryRun = opts.dryRun ?? false;
+
+  // Gate only executions that can send page content to a provider. Dry-run is
+  // a provider-free eligibility preview and must work without credentials.
+  // A task override may be servable even when the process-wide chat model is
+  // not (or vice versa).
+  if (!dryRun && !isAvailable('chat', opts.model)) {
     return {
       pages_scanned: 0,
       claims_extracted: 0,
@@ -152,7 +156,6 @@ export async function extractTakesFromPages(
     };
   }
 
-  const dryRun = opts.dryRun ?? false;
   const maxPages = opts.maxPages ?? 50;
   const holder = opts.holder ?? 'system';
   const sourceFilter = opts.sourceIdFilter ? `AND source_id = $1` : '';
@@ -182,6 +185,19 @@ export async function extractTakesFromPages(
     params,
   );
 
+  // Privacy + spend contract: a dry-run reports how many eligible pages the
+  // real run would inspect. It never sends compiled_truth to chat and never
+  // estimates claims by asking a model.
+  if (dryRun) {
+    return {
+      pages_scanned: pages.length,
+      claims_extracted: 0,
+      consent_gate_blocked: false,
+      llm_unavailable: false,
+      ...emptyTail,
+    };
+  }
+
   let pagesScanned = 0;
   let claimsExtracted = 0;
   let pagesSkipped = 0;
@@ -206,18 +222,16 @@ export async function extractTakesFromPages(
     // #4473: locate the page's markdown home BEFORE the LLM call — a page the
     // fence writer would refuse must not burn classifier budget (skipped pages
     // hold no takes, so every future run would re-classify them).
-    if (!dryRun) {
-      let locatable = false;
-      try {
-        const { path } = await resolveTakesWritePath(engine, repoDir, page.slug, page.source_id);
-        locatable = existsSync(path);
-      } catch {
-        locatable = false; // mirror_unavailable (no repo dir + no source local_path)
-      }
-      if (!locatable) {
-        skipPage(page.slug, 'mirror_unavailable');
-        continue;
-      }
+    let locatable = false;
+    try {
+      const { path } = await resolveTakesWritePath(engine, repoDir, page.slug, page.source_id);
+      locatable = existsSync(path);
+    } catch {
+      locatable = false; // mirror_unavailable (no repo dir + no source local_path)
+    }
+    if (!locatable) {
+      skipPage(page.slug, 'mirror_unavailable');
+      continue;
     }
 
     // Truncate to keep per-page cost bounded (~20K chars → ~5K input tokens).
@@ -248,11 +262,6 @@ export async function extractTakesFromPages(
 
     const claims = parseClaimsJson(response.text);
     if (claims.length === 0) continue;
-
-    if (dryRun) {
-      claimsExtracted += claims.length;
-      continue;
-    }
 
     // #4473: md-first write through the fence pipeline (row numbers derive
     // from the fence — max existing + 1 — so the historical row_num=1

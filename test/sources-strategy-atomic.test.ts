@@ -40,6 +40,13 @@ async function config(): Promise<Record<string, unknown>> {
     : rows[0]!.config;
 }
 
+async function replaceConfig(value: unknown): Promise<void> {
+  await engine.executeRaw(
+    `UPDATE sources SET config = $1::jsonb WHERE id = 'gstack'`,
+    [JSON.stringify(value)],
+  );
+}
+
 describe('sources set-strategy — atomic JSONB mutation', () => {
   test('setting strategy preserves every unrelated config key', async () => {
     await runSourceSetStrategy(engine, ['gstack', 'code']);
@@ -49,5 +56,71 @@ describe('sources set-strategy — atomic JSONB mutation', () => {
   test('unsetting strategy removes only strategy', async () => {
     await runSourceSetStrategy(engine, ['gstack', 'unset']);
     expect(await config()).toEqual({ federated: true, ttl_days: 90 });
+  });
+
+  test('setting strategy recovers a historical nested JSON string without losing keys', async () => {
+    await replaceConfig(JSON.stringify({
+      federated: true,
+      ttl_days: 90,
+      concurrent_key: 'preserved',
+      strategy: 'markdown',
+    }));
+
+    await runSourceSetStrategy(engine, ['gstack', 'code']);
+
+    expect(await config()).toEqual({
+      federated: true,
+      ttl_days: 90,
+      concurrent_key: 'preserved',
+      strategy: 'code',
+    });
+  });
+
+  test('unsetting strategy also recovers a historical nested JSON string', async () => {
+    await replaceConfig(JSON.stringify({
+      federated: true,
+      concurrent_key: 'preserved',
+      strategy: 'code',
+    }));
+
+    await runSourceSetStrategy(engine, ['gstack', 'unset']);
+
+    expect(await config()).toEqual({
+      federated: true,
+      concurrent_key: 'preserved',
+    });
+  });
+
+  test('setting strategy recovers historical array fragments without losing keys', async () => {
+    await replaceConfig([
+      { federated: true },
+      JSON.stringify({ ttl_days: 90 }),
+      { concurrent_key: 'preserved', strategy: 'markdown' },
+    ]);
+
+    await runSourceSetStrategy(engine, ['gstack', 'code']);
+
+    expect(await config()).toEqual({
+      federated: true,
+      ttl_days: 90,
+      concurrent_key: 'preserved',
+      strategy: 'code',
+    });
+  });
+
+  test('unsetting strategy recovers historical array fragments and preserves concurrent keys', async () => {
+    await replaceConfig([
+      { federated: true },
+      JSON.stringify({ ttl_days: 90 }),
+      { concurrent_key: 'preserved', strategy: 'markdown' },
+    ]);
+
+    await runSourceSetStrategy(engine, ['gstack', 'unset']);
+
+    expect(await config()).toEqual({
+      federated: true,
+      ttl_days: 90,
+      concurrent_key: 'preserved',
+    });
   });
 });

@@ -1,4 +1,5 @@
 import type { BrainEngine } from '../core/engine.ts';
+import { SOURCE_CONFIG_OBJECT_SQL } from '../core/source-config-sql.ts';
 
 type SourceStrategy = 'markdown' | 'code' | 'auto';
 
@@ -12,22 +13,17 @@ export async function runSourceSetStrategy(engine: BrainEngine, args: string[]):
 
   // Mutate only config.strategy in one statement. The previous SELECT then
   // whole-object UPDATE could erase a concurrent supervisor/cycle config write.
-  const objectConfig = `CASE
-    WHEN jsonb_typeof(COALESCE(config, '{}'::jsonb)) = 'object'
-      THEN COALESCE(config, '{}'::jsonb)
-    ELSE '{}'::jsonb
-  END`;
   const rows = requested === 'unset'
     ? await engine.executeRaw<{ id: string }>(
         `UPDATE sources
-            SET config = (${objectConfig}) - 'strategy'
+            SET config = ${SOURCE_CONFIG_OBJECT_SQL} - 'strategy'
           WHERE id = $1
         RETURNING id`,
         [id],
       )
     : await engine.executeRaw<{ id: string }>(
         `UPDATE sources
-            SET config = (${objectConfig}) || jsonb_build_object('strategy', $2::text)
+            SET config = ${SOURCE_CONFIG_OBJECT_SQL} || jsonb_build_object('strategy', $2::text)
           WHERE id = $1
         RETURNING id`,
         [id, requested as SourceStrategy],

@@ -1,5 +1,6 @@
 import type { BrainEngine } from './engine.ts';
 import { parseSourceConfig } from './sources-load.ts';
+import { SOURCE_CONFIG_OBJECT_SQL } from './source-config-sql.ts';
 
 /**
  * A code source is retrieved through the symbol/edge graph. It must not be
@@ -21,7 +22,8 @@ export async function listActiveMemorySourceIds(engine: BrainEngine): Promise<st
 
 /** SQL predicate for queries that already join the source table as `s`. */
 export const ACTIVE_MEMORY_SOURCE_SQL =
-  "s.archived IS NOT TRUE AND COALESCE(s.config->>'strategy', '') <> 'code'";
+  `s.archived IS NOT TRUE
+   AND COALESCE((${SOURCE_CONFIG_OBJECT_SQL})->>'strategy', '') <> 'code'`;
 
 /** SQL predicate for queries whose page alias is `p`. */
 export const ACTIVE_MEMORY_PAGE_SQL =

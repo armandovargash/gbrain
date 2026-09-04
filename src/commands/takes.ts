@@ -704,8 +704,8 @@ Common flags:
  * lifts gradeable claims into the takes fence.
  *
  * Two-gate consent: requires `takes.bootstrap_enabled=true` in config
- * AND explicit --yes flag for any non-dryRun run. Refuses LLM-bearing
- * extraction without both.
+ * AND explicit --yes for every provider-bearing run. `--dry-run` is a local,
+ * provider-free eligibility preview: it counts pages but extracts no claims.
  */
 async function cmdExtract(engine: BrainEngine, rest: string[]): Promise<void> {
   const sub = rest[0];
@@ -758,7 +758,7 @@ async function cmdExtract(engine: BrainEngine, rest: string[]): Promise<void> {
     }
     process.stderr.write(
       `[takes extract] sends concept/atom/lore/briefing/writing/originals page content to ${modelLabel}.\n` +
-      `Pass --yes to proceed (or --dry-run to preview).\n`,
+      `Pass --yes to proceed (or --dry-run for a provider-free eligible-page preview).\n`,
     );
     process.exit(1);
   }

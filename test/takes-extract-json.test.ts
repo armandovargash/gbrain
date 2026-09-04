@@ -74,7 +74,7 @@ describe('gbrain takes extract --from-pages --json (#3962)', () => {
     });
   });
 
-  test('passes --model through to the takes classifier', async () => {
+  test('dry-run with --model remains provider-free', async () => {
     seenModels.length = 0;
     pages = [{
       id: 1,
@@ -90,6 +90,6 @@ describe('gbrain takes extract --from-pages --json (#3962)', () => {
       '--model', 'openai:gpt-5.6-luna',
     ]));
 
-    expect(seenModels).toEqual(['openai:gpt-5.6-luna']);
+    expect(seenModels).toEqual([]);
   });
 });

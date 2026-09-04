@@ -512,7 +512,8 @@ export function linkReadScopeOpts(ctx: OperationContext): { sourceId?: string; s
  *       remote                           → the caller's grant (sourceScopeOpts)
  *   - explicit `source_id`:
  *       remote + federated grant that doesn't include it → permission_denied
- *       otherwise                                        → `{ sourceId }`
+ *       remote + no ambient source/grant                   → permission_denied
+ *       otherwise                                          → `{ sourceId }`
  *   - neither → the caller's grant (sourceScopeOpts).
  *
  * `code_traversal_cache_clear` is intentionally NOT a caller — it is localOnly
@@ -529,12 +530,22 @@ export function resolveRequestedScope(
   }
   if (sourceIdParam !== undefined) {
     const allowed = ctx.auth?.allowedSources;
-    if (ctx.remote !== false && allowed && allowed.length > 0 && !allowed.includes(sourceIdParam)) {
-      throw new OperationError(
-        'permission_denied',
-        `source '${sourceIdParam}' is outside your granted sources`,
-        'Request access to this source, or omit source_id to search within your grant.',
-      );
+    if (ctx.remote !== false) {
+      if (allowed && allowed.length > 0) {
+        if (!allowed.includes(sourceIdParam)) {
+          throw new OperationError(
+            'permission_denied',
+            `source '${sourceIdParam}' is outside your granted sources`,
+            'Request access to this source, or omit source_id to search within your grant.',
+          );
+        }
+      } else if (!ctx.sourceId || ctx.sourceId === ALL_SOURCES) {
+        throw new OperationError(
+          'permission_denied',
+          'No source in scope for this request.',
+          'Use a client bound to this source, or request an explicit source grant.',
+        );
+      }
     }
     return { sourceId: sourceIdParam };
   }
@@ -761,8 +772,8 @@ export async function routeCodeIntelScope(
 ): Promise<{ allSources: boolean; sourceId?: string }> {
   // Code-intel returns repo-relative paths and source-owned graph edges. A
   // scalar-bound remote client must not replace that binding with an explicit
-  // source_id. Federated grants are checked by resolveRequestedScope below;
-  // this is the scalar sibling of the same auth boundary.
+  // source_id. Federated grants and no-scope callers are checked by the shared
+  // resolver below; this is the scalar sibling of the same auth boundary.
   if (
     ctx.remote !== false &&
     sourceIdParam !== undefined &&

@@ -13,6 +13,7 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'bun:test'
 import { MinionSupervisor, queryWedgeSignals } from '../src/core/minions/supervisor.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
+import { countPendingSupervisorJobs } from '../src/commands/doctor.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 
 // ---------------------------------------------------------------------------
@@ -206,6 +207,15 @@ async function seed(
 }
 
 describe('issue #1801 — queryWedgeSignals SQL semantics (PGLite)', () => {
+  it('doctor pending-work probe counts waiting and due-delayed, but not future-delayed jobs', async () => {
+    await seed('doctor', 'cycle', 'waiting');
+    await seed('doctor', 'cycle', 'delayed', { delayUntilSql: "now() - interval '1 min'" });
+    await seed('doctor', 'cycle', 'delayed', { delayUntilSql: "now() + interval '1 hour'" });
+    await seed('doctor', 'cycle', 'completed');
+
+    expect(await countPendingSupervisorJobs(engine)).toBe(2);
+  });
+
   it('scopes claimable by name, counts due-delayed, excludes not-due-delayed (Codex #5/#7)', async () => {
     const q = 'sql-a';
     await seed(q, 'cycle', 'waiting');                                            // claimable

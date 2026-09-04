@@ -237,6 +237,26 @@ describe('A13 — code_def / code_refs authenticated source isolation', () => {
       'outside your granted source',
     );
   });
+
+  test('every code-intel op rejects explicit source_id from a remote no-scope context', async () => {
+    await seedTwoSourceCodeGraph();
+    const requests: Array<[keyof typeof operationsByName, Record<string, unknown>]> = [
+      ['code_callers', { symbol: 'betaSecretFn', source_id: 'srcbeta' }],
+      ['code_callees', { symbol: 'betaCallerFn', source_id: 'srcbeta' }],
+      ['code_def', { symbol: 'betaSecretFn', source_id: 'srcbeta' }],
+      ['code_refs', { symbol: 'betaSecretFn', source_id: 'srcbeta' }],
+      ['code_blast', { symbol: 'betaSecretFn', source_id: 'srcbeta' }],
+      ['code_flow', { entry_point: 'betaCallerFn', source_id: 'srcbeta' }],
+    ];
+
+    for (const [name, params] of requests) {
+      await expectOpError(
+        operationsByName[name]!.handler(remoteNoScope(), params),
+        'permission_denied',
+        'No source in scope',
+      );
+    }
+  });
 });
 
 // ─── (2) code_blast / code_flow: the resolveCodeIntelScope fence ──────────

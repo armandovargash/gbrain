@@ -133,4 +133,24 @@ describe('extractTakesFromPages — model resolution (#2997)', () => {
       __setChatTransportForTests(stubChatTransport);
     }
   });
+
+  test('dry-run is a provider-free page-count preview even with an explicit model', async () => {
+    configureGateway({
+      chat_model: 'openai:gpt-config-plane-test',
+      env: { OPENAI_API_KEY: 'sk-test-model-resolution' },
+    });
+    await seedPage();
+
+    const r = await extractTakesFromPages(engine, {
+      bootstrapEnabled: true,
+      dryRun: true,
+      maxPages: 50,
+      model: 'openai:gpt-5.6-luna',
+    });
+
+    expect(r.pages_scanned).toBe(1);
+    expect(r.claims_extracted).toBe(0);
+    expect(r.llm_unavailable).toBe(false);
+    expect(seenModels).toEqual([]);
+  });
 });

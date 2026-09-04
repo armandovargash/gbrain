@@ -93,7 +93,7 @@ export {
   computeWedgedQueueCheck,
   computeOrphanedPrivateQueueCheck,
   computeAutopilotFanoutConcurrencyCheck,
-  checkBatchRetryHealth, classifyCleanSupervisorShutdown,
+  checkBatchRetryHealth, classifyCleanSupervisorShutdown, countPendingSupervisorJobs,
 } from './doctor/checks/queue-jobs.ts';
 export {
   checkGraphSignalsCoverage,
@@ -184,7 +184,7 @@ import {
   computeWedgedQueueCheck,
   computeOrphanedPrivateQueueCheck,
   computeAutopilotFanoutConcurrencyCheck,
-  checkBatchRetryHealth, classifyCleanSupervisorShutdown,
+  checkBatchRetryHealth, classifyCleanSupervisorShutdown, countPendingSupervisorJobs,
 } from './doctor/checks/queue-jobs.ts';
 import {
   checkGraphSignalsCoverage,
@@ -1023,12 +1023,7 @@ export async function buildChecks(
     let stoppedQueueState: number | 'unavailable' | 'not_checked' = 'not_checked';
     if (!running && stoppedCleanly && engine) {
       try {
-        const rows = await engine.executeRaw<{ waiting: string | number }>(
-          `SELECT count(*)::int AS waiting
-             FROM minion_jobs
-            WHERE status = 'waiting'`,
-        );
-        stoppedQueueState = Number(rows[0]?.waiting ?? 0);
+        stoppedQueueState = await countPendingSupervisorJobs(engine);
       } catch {
         stoppedQueueState = 'unavailable';
       }
