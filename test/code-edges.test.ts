@@ -89,6 +89,18 @@ describe('Layer 5 (A1) — code-edges engine methods', () => {
     expect(results[0]!.to_symbol_qualified).toBe('helper');
   });
 
+  test('resolver metadata makes a symbol edge readable as resolved', async () => {
+    await engine.executeRaw(
+      `UPDATE code_edges_symbol
+          SET edge_metadata = jsonb_build_object('resolved_chunk_id', $1::int)
+        WHERE from_chunk_id = $2 AND to_symbol_qualified = 'helper'`,
+      [chunkB, chunkA],
+    );
+    const results = await engine.getCallersOf('helper', { allSources: true });
+    const hit = results.find(r => r.from_chunk_id === chunkA && r.to_chunk_id === chunkB);
+    expect(hit?.resolved).toBe(true);
+  });
+
   test('addCodeEdges is idempotent (ON CONFLICT DO NOTHING)', async () => {
     // Re-inserting the same edge returns 0 insertions.
     const inserted = await engine.addCodeEdges([{

@@ -143,5 +143,9 @@ describeIfDB('addCodeEdges jsonb encoding — Postgres regression (#2968)', () =
     expect(rows.length).toBe(1);
     expect(rows[0]!.kind).toBe('object');
     expect(rows[0]!.resolved).toBe(String(chunkB));
+
+    const callers = await engine.getCallersOf('phantom', { allSources: true });
+    expect(callers[0]?.to_chunk_id).toBe(chunkB);
+    expect(callers[0]?.resolved).toBe(true);
   });
 });
