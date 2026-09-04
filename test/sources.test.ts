@@ -339,3 +339,27 @@ describe('sources federate / unfederate', () => {
     expect(parsed.federated).toBe(false);
   });
 });
+
+describe('sources set-strategy', () => {
+  test('sets code strategy while preserving other config keys', async () => {
+    const { engine, calls } = makeStub({
+      'SELECT config FROM sources': [
+        { config: '{"federated":true}' },
+      ],
+    });
+    await runSources(engine, ['set-strategy', 'gstack', 'code']);
+    const upd = calls.find(c => c.sql.includes('UPDATE sources SET config'));
+    expect(JSON.parse(upd!.params[0] as string)).toEqual({ federated: true, strategy: 'code' });
+  });
+
+  test('unset removes only the strategy key', async () => {
+    const { engine, calls } = makeStub({
+      'SELECT config FROM sources': [
+        { config: '{"federated":true,"strategy":"code"}' },
+      ],
+    });
+    await runSources(engine, ['set-strategy', 'gstack', 'unset']);
+    const upd = calls.find(c => c.sql.includes('UPDATE sources SET config'));
+    expect(JSON.parse(upd!.params[0] as string)).toEqual({ federated: true });
+  });
+});

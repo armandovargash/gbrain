@@ -67,7 +67,6 @@ import {
 } from '../core/sources-load.ts';
 import { sqlQueryForEngine } from '../core/sql-query.ts';
 import { preflightOauthClientColumns } from './auth.ts';
-
 // ── Validation ──────────────────────────────────────────────
 
 // Shared with source-resolver.ts — canonical shape.
@@ -1835,6 +1834,7 @@ export async function runSources(engine: BrainEngine, args: string[]): Promise<v
     case 'detach':     runDetach(); return;
     case 'federate':   return runFederate(engine, rest, true);
     case 'unfederate': return runFederate(engine, rest, false);
+    case 'set-strategy': { const { runSourceSetStrategy } = await import('./sources-strategy.ts'); return runSourceSetStrategy(engine, rest); }
     case 'archive':    return runArchive(engine, rest);
     case 'restore':    return runRestore(engine, rest);
     case 'purge':      return runPurge(engine, rest);
@@ -1910,7 +1910,7 @@ Subcommands:
                                     real render functions. No token/network/
                                     brain needed. See docs/guides/github-source.md.
   federate <id>                     Make source appear in cross-source default search.
-  unfederate <id>                   Isolate source from default search.
+  unfederate <id>                   Isolate source from default search.\n  set-strategy <id> <markdown|code|auto|unset>  Persist the strategy used by sync --all and autopilot.
   set-cr-mode <id> <none|title|per_chunk_synopsis>
                                     Per-source contextual retrieval mode
                                     override (v0.40.3.0). Pass "unset" or
