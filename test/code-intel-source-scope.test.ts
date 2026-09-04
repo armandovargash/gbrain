@@ -4,15 +4,10 @@
  * Pins the per-op source-scope CONTRACT of the code-intel cluster
  * (src/core/ops/code-intel.ts) so none of it stays ambiguous:
  *
- *   - code_def / code_refs — BRAIN-WIDE BY DESIGN (documented decision:
- *     the brain-wide comments in code_def's and code_refs' handlers in
- *     src/core/ops/code-intel.ts say "brain-wide (not source-scoped)", and
- *     the underlying SQL in src/commands/code-def.ts:findCodeDef /
- *     src/commands/code-refs.ts:findCodeRefs carries NO source filter). A
- *     remote caller scoped to srcalpha (scalar or federated grant) CAN see
- *     srcbeta definitions and references. Rows do NOT project source_id
- *     (slug is the only source signal) — pinned below so a future scoping
- *     change trips this suite deliberately rather than drifting silently.
+ *   - code_def / code_refs — use the same fail-closed source resolver as the
+ *     graph operations. Scalar and single-source federated grants see only
+ *     that source; no-scope remote callers are denied; a multi-source grant
+ *     must choose one granted source explicitly.
  *
  *   - code_blast / code_flow — fenced through resolveCodeIntelScope
  *     (src/core/ops/context.ts): remote + no source in scope → the
@@ -170,56 +165,77 @@ async function seedTwoSourceCodeGraph(): Promise<void> {
   await insertUnresolvedEdge(betaCallerChunk, 'betaCallerFn', 'alphaTargetFn', 'srcbeta');
 }
 
-// ─── (1) code_def / code_refs: brain-wide by design — pinned explicitly ────
+// ─── (1) code_def / code_refs: authenticated source isolation ─────────────
 
-describe('A13 — code_def / code_refs are brain-wide by design (documented decision)', () => {
-  test('code_def: alpha-scoped remote caller sees a beta-only definition (brain-wide handler)', async () => {
+describe('A13 — code_def / code_refs authenticated source isolation', () => {
+  test('code_def: scalar alpha scope cannot see a beta-only definition', async () => {
     await seedTwoSourceCodeGraph();
     const op = operationsByName.code_def!;
-    // DOCUMENTED DECISION: code_def does not route through ctx scope — the
-    // findCodeDef SQL (src/commands/code-def.ts) has no source filter and the
-    // brain-wide comment in code_def's handler (src/core/ops/code-intel.ts)
-    // names it brain-wide.
     const result = (await op.handler(remoteAlpha(), { symbol: 'betaSecretFn' })) as {
       count: number;
-      defs: Array<Record<string, unknown>>;
+      source_id: string;
+      defs: Array<{ slug: string }>;
     };
-    expect(result.count).toBe(1);
-    expect(result.defs[0]!.slug).toBe('src/beta-lib.ts');
-    // Rows do not project source_id; the slug is the only source signal.
-    // Pinned so a future projection/scoping change fails here consciously.
-    expect('source_id' in result.defs[0]!).toBe(false);
-    // Sanity: the same brain-wide read also sees the caller's own source.
+    expect(result.source_id).toBe('srcalpha');
+    expect(result.count).toBe(0);
+    expect(result.defs).toEqual([]);
+    expect(containsBeta(result.defs)).toBe(false);
+    // Anti-vacuity: the caller's own definition remains visible.
     const own = (await op.handler(remoteAlpha(), { symbol: 'alphaTargetFn' })) as { count: number };
     expect(own.count).toBe(1);
   });
 
-  test('code_def: a federated grant does not scope it either (brain-wide for federated remote callers)', async () => {
+  test('code_def: a single-source federated grant is isolated and cannot widen with all_sources', async () => {
     await seedTwoSourceCodeGraph();
     const op = operationsByName.code_def!;
     const result = (await op.handler(remoteFederatedAlpha(), { symbol: 'betaSecretFn' })) as {
       count: number;
-      defs: Array<{ slug: string }>;
+      defs: Array<unknown>;
     };
-    expect(result.count).toBe(1);
-    expect(result.defs[0]!.slug).toBe('src/beta-lib.ts');
+    expect(result.count).toBe(0);
+    expect(result.defs).toEqual([]);
+    const widened = (await op.handler(remoteFederatedAlpha(), {
+      symbol: 'betaSecretFn', all_sources: true,
+    })) as { count: number; defs: Array<unknown> };
+    expect(widened.count).toBe(0);
+    expect(widened.defs).toEqual([]);
   });
 
-  test('code_refs: alpha-scoped remote caller sees beta chunk text (brain-wide handler)', async () => {
+  test('code_refs: scalar alpha scope cannot see beta chunk text', async () => {
     await seedTwoSourceCodeGraph();
     const op = operationsByName.code_refs!;
-    // DOCUMENTED DECISION: findCodeRefs (src/commands/code-refs.ts) is an
-    // unscoped ILIKE scan over content_chunks; the brain-wide comment in
-    // code_refs' handler (src/core/ops/code-intel.ts) names it brain-wide.
     const result = (await op.handler(remoteAlpha(), { symbol: 'betaSecretFn' })) as {
       count: number;
-      refs: Array<Record<string, unknown>>;
+      refs: Array<unknown>;
     };
-    expect(result.count).toBe(1);
-    expect(result.refs[0]!.slug).toBe('src/beta-lib.ts');
-    expect(String(result.refs[0]!.snippet)).toContain('betaSecretFn');
-    // No source_id projection on ref rows either — pinned (see code_def above).
-    expect('source_id' in result.refs[0]!).toBe(false);
+    expect(result.count).toBe(0);
+    expect(result.refs).toEqual([]);
+    expect(containsBeta(result.refs)).toBe(false);
+    const control = (await op.handler(remoteBeta(), { symbol: 'betaSecretFn' })) as { count: number };
+    expect(control.count).toBeGreaterThan(0);
+  });
+
+  test('code_def/code_refs: remote no-scope and out-of-grant requests fail closed', async () => {
+    await seedTwoSourceCodeGraph();
+    await expectOpError(
+      operationsByName.code_def!.handler(remoteNoScope(), { symbol: 'alphaTargetFn' }),
+      'permission_denied',
+      'No source in scope',
+    );
+    await expectOpError(
+      operationsByName.code_refs!.handler(remoteFederatedAlpha(), {
+        symbol: 'betaSecretFn', source_id: 'srcbeta',
+      }),
+      'permission_denied',
+      'outside your granted sources',
+    );
+    await expectOpError(
+      operationsByName.code_def!.handler(remoteAlpha(), {
+        symbol: 'betaSecretFn', source_id: 'srcbeta',
+      }),
+      'permission_denied',
+      'outside your granted source',
+    );
   });
 });
 
@@ -332,6 +348,24 @@ describe('A13 — code_blast / code_flow resolveCodeIntelScope fence', () => {
 // ─── (3) code_callees: isolation mirror of code_callers' pinned contract ──
 
 describe('A13 — code_callees remote isolation (mirrors code_callers, pinned in code-intel-mcp-ops e2e)', () => {
+  test('remote scalar alpha binding cannot be replaced with source_id=srcbeta', async () => {
+    await seedTwoSourceCodeGraph();
+    await expectOpError(
+      operationsByName.code_callers!.handler(remoteAlpha(), {
+        symbol: 'betaSecretFn', source_id: 'srcbeta',
+      }),
+      'permission_denied',
+      'outside your granted source',
+    );
+    await expectOpError(
+      operationsByName.code_callees!.handler(remoteAlpha(), {
+        symbol: 'sharedCallerFn', source_id: 'srcbeta',
+      }),
+      'permission_denied',
+      'outside your granted source',
+    );
+  });
+
   test('remote scalar alpha scope: beta callee edges invisible; local all_sources control sees them', async () => {
     await seedTwoSourceCodeGraph();
     const op = operationsByName.code_callees!;

@@ -739,8 +739,8 @@ export function resolveCodeIntelScope(
  * code_blast / code_flow) — the #3242 sibling. An UNQUALIFIED graph query from
  * a no-grant caller collapses to the scalar seed source (usually 'default'),
  * which on vault+code brains holds no code — so the graph ops report
- * `not_built` while code_def / code_refs (which widen across
- * `ctx.localFederatedSourceIds`) answer fine. Graph traversal must stay
+ * `not_built` while other federated search surfaces may find code elsewhere.
+ * Graph traversal must stay
  * single-source (engine API + cache key take ONE sourceId), so instead of
  * widening we RE-ROUTE: when the collapsed source has no code chunks and
  * exactly one source in the caller's federated read set does, traverse that
@@ -759,6 +759,24 @@ export async function routeCodeIntelScope(
   sourceIdParam: string | undefined,
   allSourcesParam = false,
 ): Promise<{ allSources: boolean; sourceId?: string }> {
+  // Code-intel returns repo-relative paths and source-owned graph edges. A
+  // scalar-bound remote client must not replace that binding with an explicit
+  // source_id. Federated grants are checked by resolveRequestedScope below;
+  // this is the scalar sibling of the same auth boundary.
+  if (
+    ctx.remote !== false &&
+    sourceIdParam !== undefined &&
+    !(ctx.auth?.allowedSources && ctx.auth.allowedSources.length > 0) &&
+    ctx.sourceId &&
+    ctx.sourceId !== ALL_SOURCES &&
+    sourceIdParam !== ctx.sourceId
+  ) {
+    throw new OperationError(
+      'permission_denied',
+      `source '${sourceIdParam}' is outside your granted source`,
+      'Omit source_id, or request the source bound to this client.',
+    );
+  }
   const scope = resolveCodeIntelScope(ctx, sourceIdParam, allSourcesParam);
   if (
     sourceIdParam !== undefined || allSourcesParam ||

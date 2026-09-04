@@ -158,16 +158,18 @@ export const CODE_DEF_DESCRIPTION =
   "class, type, interface, enum, struct, trait, module, contract). Use this BEFORE " +
   "reaching for grep when you want to read a definition. Single-result is the common " +
   "case; multiple results indicate same-name symbols across files (which is information " +
-  "in itself). " +
+  "in itself). Defaults to the caller's source; federated clients with multiple " +
+  "granted sources must pass one granted source_id. " +
   "Returns: `{symbol, count, defs: [{slug, file, language, symbol_type, start_line, end_line, snippet}]}`. " +
   "Filter by --lang to scope a polyglot brain (e.g., lang='typescript').";
 
 export const CODE_REFS_DESCRIPTION =
-  "Find every reference to a symbol across the codebase (every file, every line). " +
+  "Find every reference to a symbol inside the selected source (every file, every line). " +
   "Differs from code_callers in two ways: (1) catches references in comments, " +
   "strings, imports, type annotations — not just call sites; (2) returns line " +
   "numbers, not symbol-qualified edges. Use this when planning a rename or " +
-  "deprecation where you need to touch every literal mention. " +
+  "deprecation where you need to touch every literal mention. Defaults to the caller's " +
+  "source; federated clients with multiple grants must pass one granted source_id. " +
   "Returns: `{symbol, count, refs: [{slug, file, language, line, context}]}`.";
 
 // ──────────────────────────────────────────────────────────────────────────────

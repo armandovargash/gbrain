@@ -236,13 +236,33 @@ export async function checkContentHashDuplicates(engine: BrainEngine): Promise<C
     // safe); a group WITHOUT that shape (all-nested, or distinct bare slugs)
     // is listed with NO delete hint (#3942 — either copy may be the canonical
     // one that links point at, so deleting one automatically is a guess).
-    const rows = await engine.executeRaw<{ source_id: string; content_hash: string; slugs: string }>(
-      `SELECT source_id, content_hash,
-              string_agg(slug, '|' ORDER BY length(slug), slug) AS slugs
-         FROM pages
-        WHERE deleted_at IS NULL AND content_hash IS NOT NULL AND content_hash <> ''
-        GROUP BY source_id, content_hash
-       HAVING count(*) > 1
+    const rows = await engine.executeRaw<{
+      source_id: string;
+      content_hash: string;
+      slugs: string;
+      intentional_raw_mirror: boolean;
+    }>(
+      `WITH duplicate_groups AS (
+         SELECT source_id,
+                content_hash,
+                array_agg(slug ORDER BY length(slug), slug) AS slug_list,
+                string_agg(slug, '|' ORDER BY length(slug), slug) AS slugs
+           FROM pages
+          WHERE deleted_at IS NULL AND content_hash IS NOT NULL AND content_hash <> ''
+          GROUP BY source_id, content_hash
+         HAVING count(*) > 1
+       )
+       SELECT source_id,
+              content_hash,
+              slugs,
+              cardinality(slug_list) = 2 AND EXISTS (
+                SELECT 1
+                  FROM unnest(slug_list) AS raw_slug(value)
+                  JOIN unnest(slug_list) AS canonical_slug(value)
+                    ON raw_slug.value = 'raw-sources/' || canonical_slug.value
+              ) AS intentional_raw_mirror
+         FROM duplicate_groups
+        ORDER BY intentional_raw_mirror ASC, source_id, content_hash
         LIMIT 50`,
     );
     if (rows.length === 0) {
@@ -259,11 +279,7 @@ export async function checkContentHashDuplicates(engine: BrainEngine): Promise<C
       // an accidental duplicate. It intentionally retains the imported input
       // beside the normalized page, and both may have graph edges. Penalizing
       // this designed pair made historical sources permanently unhealthy.
-      if (
-        slugs.length === 2 &&
-        slugs.some((slug) => slug.startsWith('raw-sources/')) &&
-        slugs.some((slug) => `raw-sources/${slug}` === slugs.find((s) => s.startsWith('raw-sources/')))
-      ) {
+      if (r.intentional_raw_mirror) {
         rawMirrorCount++;
         continue;
       }

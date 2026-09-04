@@ -117,18 +117,35 @@ const code_def: Operation = {
     symbol: { type: 'string', required: true, description: 'Symbol name (bare token; e.g., parseMarkdown, BrainEngine).' },
     limit: { type: 'number', description: 'Max definition sites returned. Default 20.' },
     lang: { type: 'string', description: "Filter by content_chunks.language (e.g. 'typescript', 'python')." },
+    source_id: { type: 'string', description: 'Scope to one source. Defaults to the caller source; federated clients with multiple granted sources must specify one.' },
+    all_sources: { type: 'boolean', description: 'Span sources locally. Remote callers remain confined to one explicitly selected granted source.' },
   },
   scope: 'read',
   handler: async (ctx, p) => {
     const { findCodeDef } = await import('../../commands/code-def.ts');
+    const sourceIdParam = typeof p.source_id === 'string' ? p.source_id : undefined;
+    // Symbol lookups share the graph operations' fail-closed scope resolver.
+    // A remote caller can never turn an omitted/`__all__` scope into a
+    // brain-wide read, and a federated client must pick one granted source.
+    const { allSources, sourceId } = await routeCodeIntelScope(ctx, sourceIdParam, p.all_sources === true);
     const defs = await findCodeDef(ctx.engine, p.symbol as string, {
       limit: (p.limit as number) ?? 20,
       language: (p.lang as string) || undefined,
+      sourceId,
+      allSources,
     });
-    // code_def is brain-wide (not source-scoped); readiness is 'symbol' grain.
     const { resolveCodeReadiness } = await import('../code-graph-readiness.ts');
-    const readiness = await resolveCodeReadiness(ctx.engine, { kind: 'symbol', count: defs.length });
-    return { symbol: p.symbol as string, count: defs.length, status: readiness.status, ready: readiness.ready, defs };
+    const readiness = await resolveCodeReadiness(ctx.engine, {
+      kind: 'symbol', count: defs.length, sourceId, allSources, remote: ctx.remote,
+    });
+    return {
+      symbol: p.symbol as string,
+      source_id: sourceId ?? null,
+      count: defs.length,
+      status: readiness.status,
+      ready: readiness.ready,
+      defs,
+    };
   },
   cliHints: { name: 'code_def', hidden: true },
 };
@@ -140,18 +157,32 @@ const code_refs: Operation = {
     symbol: { type: 'string', required: true, description: 'Symbol to find references to.' },
     limit: { type: 'number', description: 'Max references returned. Default 50.' },
     lang: { type: 'string', description: "Filter by content_chunks.language." },
+    source_id: { type: 'string', description: 'Scope to one source. Defaults to the caller source; federated clients with multiple granted sources must specify one.' },
+    all_sources: { type: 'boolean', description: 'Span sources locally. Remote callers remain confined to one explicitly selected granted source.' },
   },
   scope: 'read',
   handler: async (ctx, p) => {
     const { findCodeRefs } = await import('../../commands/code-refs.ts');
+    const sourceIdParam = typeof p.source_id === 'string' ? p.source_id : undefined;
+    const { allSources, sourceId } = await routeCodeIntelScope(ctx, sourceIdParam, p.all_sources === true);
     const refs = await findCodeRefs(ctx.engine, p.symbol as string, {
       limit: (p.limit as number) ?? 50,
       language: (p.lang as string) || undefined,
+      sourceId,
+      allSources,
     });
-    // code_refs is brain-wide (not source-scoped); readiness is 'symbol' grain.
     const { resolveCodeReadiness } = await import('../code-graph-readiness.ts');
-    const readiness = await resolveCodeReadiness(ctx.engine, { kind: 'symbol', count: refs.length });
-    return { symbol: p.symbol as string, count: refs.length, status: readiness.status, ready: readiness.ready, refs };
+    const readiness = await resolveCodeReadiness(ctx.engine, {
+      kind: 'symbol', count: refs.length, sourceId, allSources, remote: ctx.remote,
+    });
+    return {
+      symbol: p.symbol as string,
+      source_id: sourceId ?? null,
+      count: refs.length,
+      status: readiness.status,
+      ready: readiness.ready,
+      refs,
+    };
   },
   cliHints: { name: 'code_refs', hidden: true },
 };

@@ -27,6 +27,18 @@ let repo: string;
 const seenModels: string[] = [];
 let pageN = 0;
 
+const stubChatTransport = async (opts: { model?: string }) => {
+  seenModels.push(opts.model ?? '(unset)');
+  return {
+    text: '[{"claim":"a stubbed claim","kind":"take","weight":0.7}]',
+    blocks: [{ type: 'text' as const, text: '[{"claim":"a stubbed claim","kind":"take","weight":0.7}]' }],
+    stopReason: 'end' as const,
+    usage: { input_tokens: 1, output_tokens: 1, cache_read_tokens: 0, cache_creation_tokens: 0 },
+    model: opts.model ?? '(unset)',
+    providerId: 'test',
+  };
+};
+
 /** Each test seeds a fresh uncovered page so the extraction loop fires.
  *  #4473: takes are md-first — the page needs a real .md home too. */
 async function seedPage(): Promise<void> {
@@ -47,17 +59,7 @@ beforeAll(async () => {
   mkdirSync(join(repo, 'concepts'), { recursive: true });
   await engine.setConfig('sync.repo_path', repo);
 
-  __setChatTransportForTests(async (opts) => {
-    seenModels.push(opts.model ?? '(unset)');
-    return {
-      text: '[{"claim":"a stubbed claim","kind":"take","weight":0.7}]',
-      blocks: [{ type: 'text' as const, text: '[{"claim":"a stubbed claim","kind":"take","weight":0.7}]' }],
-      stopReason: 'end' as const,
-      usage: { input_tokens: 1, output_tokens: 1, cache_read_tokens: 0, cache_creation_tokens: 0 },
-      model: opts.model ?? '(unset)',
-      providerId: 'test',
-    };
-  });
+  __setChatTransportForTests(stubChatTransport);
 });
 
 afterAll(async () => {
@@ -101,5 +103,34 @@ describe('extractTakesFromPages — model resolution (#2997)', () => {
     });
     expect(r.pages_scanned).toBe(1);
     expect(seenModels).toEqual(['anthropic:claude-haiku-4-5']);
+  });
+
+  test('the availability gate checks the explicit model, not the unavailable global chat model', async () => {
+    // Remove the transport seam so isAvailable must evaluate actual recipe
+    // auth. LIMIT 0 proves the gate without making a provider call.
+    __setChatTransportForTests(null);
+    try {
+      configureGateway({
+        chat_model: 'anthropic:claude-haiku-4-5',
+        env: { OPENAI_API_KEY: 'sk-test-model-resolution' },
+      });
+
+      const explicit = await extractTakesFromPages(engine, {
+        bootstrapEnabled: true,
+        maxPages: 0,
+        model: 'openai:gpt-5.6-luna',
+      });
+      expect(explicit.llm_unavailable).toBe(false);
+      expect(explicit.pages_scanned).toBe(0);
+
+      const global = await extractTakesFromPages(engine, {
+        bootstrapEnabled: true,
+        maxPages: 0,
+      });
+      expect(global.llm_unavailable).toBe(true);
+      expect(seenModels).toEqual([]);
+    } finally {
+      __setChatTransportForTests(stubChatTransport);
+    }
   });
 });

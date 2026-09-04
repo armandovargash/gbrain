@@ -1,5 +1,4 @@
 import type { BrainEngine } from '../core/engine.ts';
-import { normalizeSourceConfig, parseSourceConfig } from '../core/sources-load.ts';
 
 type SourceStrategy = 'markdown' | 'code' | 'auto';
 
@@ -11,22 +10,32 @@ export async function runSourceSetStrategy(engine: BrainEngine, args: string[]):
     process.exit(2);
   }
 
-  const rows = await engine.executeRaw<{ config: Record<string, unknown> | string }>(
-    `SELECT config FROM sources WHERE id = $1`,
-    [id],
-  );
+  // Mutate only config.strategy in one statement. The previous SELECT then
+  // whole-object UPDATE could erase a concurrent supervisor/cycle config write.
+  const objectConfig = `CASE
+    WHEN jsonb_typeof(COALESCE(config, '{}'::jsonb)) = 'object'
+      THEN COALESCE(config, '{}'::jsonb)
+    ELSE '{}'::jsonb
+  END`;
+  const rows = requested === 'unset'
+    ? await engine.executeRaw<{ id: string }>(
+        `UPDATE sources
+            SET config = (${objectConfig}) - 'strategy'
+          WHERE id = $1
+        RETURNING id`,
+        [id],
+      )
+    : await engine.executeRaw<{ id: string }>(
+        `UPDATE sources
+            SET config = (${objectConfig}) || jsonb_build_object('strategy', $2::text)
+          WHERE id = $1
+        RETURNING id`,
+        [id, requested as SourceStrategy],
+      );
   if (rows.length === 0) {
     console.error(`Source "${id}" not found.`);
     process.exit(4);
   }
-
-  const config = parseSourceConfig(rows[0].config);
-  if (requested === 'unset') delete config.strategy;
-  else config.strategy = requested as SourceStrategy;
-  await engine.executeRaw(
-    `UPDATE sources SET config = $1::text::jsonb WHERE id = $2`,
-    [JSON.stringify(normalizeSourceConfig(config)), id],
-  );
   console.log(
     requested === 'unset'
       ? `Source "${id}" sync strategy is now unset (defaults to markdown).`

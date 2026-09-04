@@ -125,6 +125,19 @@ describe('content_hash_duplicates (#2250)', () => {
     expect((c.details as any).raw_mirror_count).toBe(1);
   });
 
+  test('more than 50 intentional mirrors cannot hide a real duplicate group', async () => {
+    for (let i = 0; i < 55; i++) {
+      await addPage(`concepts/mirror-${i}`, { hash: `mirror-${i}` });
+      await addPage(`raw-sources/concepts/mirror-${i}`, { hash: `mirror-${i}` });
+    }
+    await addPage('people/visible-duplicate', { hash: 'real-duplicate' });
+    await addPage('visible-duplicate', { hash: 'real-duplicate' });
+
+    const c = await checkContentHashDuplicates(engine);
+    expect(c.status).toBe('warn');
+    expect(c.message).toContain('visible-duplicate <-> people/visible-duplicate');
+  });
+
   test('#3946: two distinct bare slugs with same hash → warn without delete hint', async () => {
     await addPage('alice-example', { hash: 'same' });
     await addPage('alice-copy', { hash: 'same' });

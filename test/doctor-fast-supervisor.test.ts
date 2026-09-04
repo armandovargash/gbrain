@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { withEnv } from './helpers/with-env.ts';
-import { buildChecks } from '../src/commands/doctor.ts';
+import { buildChecks, classifyCleanSupervisorShutdown } from '../src/commands/doctor.ts';
 import { writeSupervisorEvent } from '../src/core/minions/handlers/supervisor-audit.ts';
 
 async function withIsolatedHome<T>(fn: (home: string) => T | Promise<T>): Promise<T> {
@@ -23,6 +23,32 @@ function supervisorCheck(checks: Awaited<ReturnType<typeof buildChecks>>) {
 }
 
 describe('#4518: supervisor check under --fast with no default-path pidfile', () => {
+  test('a cleanly stopped supervisor warns when jobs are waiting', () => {
+    const check = classifyCleanSupervisorShutdown('2026-09-04T08:01:00.000Z', 3);
+    expect(check.status).toBe('warn');
+    expect(check.message).toContain('3 job(s) are waiting');
+    expect(check.message).toContain('Restart with');
+  });
+
+  test('a cleanly stopped supervisor warns when queue state cannot be read', () => {
+    const check = classifyCleanSupervisorShutdown('2026-09-04T08:01:00.000Z', 'unavailable');
+    expect(check.status).toBe('warn');
+    expect(check.message).toContain('could not be verified');
+  });
+
+  test('a cleanly stopped supervisor warns when queue state was not checked', () => {
+    const check = classifyCleanSupervisorShutdown('2026-09-04T08:01:00.000Z', 'not_checked');
+    expect(check.status).toBe('warn');
+    expect(check.message).toContain('queue state was not checked');
+    expect(check.message).not.toContain('no waiting jobs');
+  });
+
+  test('a cleanly stopped supervisor is healthy only after proving the queue is empty', () => {
+    const check = classifyCleanSupervisorShutdown('2026-09-04T08:01:00.000Z', 0);
+    expect(check.status).toBe('ok');
+    expect(check.message).toContain('no waiting jobs');
+  });
+
   test('no supervisor ever observed → no check surfaced at all (unaffected by the fix)', async () => {
     await withIsolatedHome(async () => {
       const checks = await buildChecks(null, ['--fast']);
@@ -68,15 +94,15 @@ describe('#4518: supervisor check under --fast with no default-path pidfile', ()
     });
   });
 
-  test('a clean shutdown after the last start is healthy, not a restart warning', async () => {
+  test('a clean shutdown without a DB check stays advisory, not falsely healthy', async () => {
     await withIsolatedHome(async () => {
       writeSupervisorEvent({ event: 'started', ts: '2026-09-04T08:00:00.000Z' }, 12345);
       writeSupervisorEvent({ event: 'shutting_down', ts: '2026-09-04T08:01:00.000Z', reason: 'SIGTERM', exit_code: 0 }, 12345);
 
       const checks = await buildChecks(null, []);
       const check = supervisorCheck(checks);
-      expect(check?.status).toBe('ok');
-      expect(check?.message).toContain('intentionally stopped');
+      expect(check?.status).toBe('warn');
+      expect(check?.message).toContain('queue state was not checked');
       expect(check?.message).not.toContain('Restart with');
     });
   });

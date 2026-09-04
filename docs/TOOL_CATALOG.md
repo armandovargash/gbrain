@@ -44,7 +44,7 @@ Every non-localOnly operation on the MCP surface: 122 tools across 23 areas. **S
 | `code_callers` | BEFORE editing any function, run code_callers with the symbol name to find every caller (the people who'd be affected by your change). | read |  |  |
 | `code_def` | Where is this symbol defined? | read |  |  |
 | `code_flow` | When tracing how a request flows through the codebase from entry point to side effect (DB write, HTTP call, file I/O), run code_flow from the entry point. | read |  |  |
-| `code_refs` | Find every reference to a symbol across the codebase (every file, every line). | read |  |  |
+| `code_refs` | Find every reference to a symbol inside the selected source (every file, every line). | read |  |  |
 
 ## discovery
 

@@ -320,7 +320,7 @@ describe('sources federate / unfederate', () => {
       ],
     });
     await runSources(engine, ['federate', 'gstack']);
-    const upd = calls.find(c => c.sql.includes('UPDATE sources SET config'));
+    const upd = calls.find(c => c.sql.includes('UPDATE sources'));
     expect(upd).toBeDefined();
     expect(JSON.parse(upd!.params[0] as string)).toEqual({ federated: true });
   });
@@ -332,7 +332,7 @@ describe('sources federate / unfederate', () => {
       ],
     });
     await runSources(engine, ['unfederate', 'gstack']);
-    const upd = calls.find(c => c.sql.includes('UPDATE sources SET config'));
+    const upd = calls.find(c => c.sql.includes('UPDATE sources'));
     const parsed = JSON.parse(upd!.params[0] as string);
     // Must preserve ttl_days while flipping federated.
     expect(parsed.ttl_days).toBe(90);
@@ -341,25 +341,27 @@ describe('sources federate / unfederate', () => {
 });
 
 describe('sources set-strategy', () => {
-  test('sets code strategy while preserving other config keys', async () => {
+  test('sets code strategy with one atomic JSONB mutation', async () => {
     const { engine, calls } = makeStub({
-      'SELECT config FROM sources': [
-        { config: '{"federated":true}' },
-      ],
+      'UPDATE sources': [{ id: 'gstack' }],
     });
     await runSources(engine, ['set-strategy', 'gstack', 'code']);
-    const upd = calls.find(c => c.sql.includes('UPDATE sources SET config'));
-    expect(JSON.parse(upd!.params[0] as string)).toEqual({ federated: true, strategy: 'code' });
+    const upd = calls.find(c => /UPDATE sources\s+SET config/.test(c.sql));
+    expect(upd).toBeDefined();
+    expect(upd!.sql).toContain("jsonb_build_object('strategy', $2::text)");
+    expect(upd!.params).toEqual(['gstack', 'code']);
+    expect(calls).toHaveLength(1);
   });
 
-  test('unset removes only the strategy key', async () => {
+  test('unset removes only the strategy key atomically', async () => {
     const { engine, calls } = makeStub({
-      'SELECT config FROM sources': [
-        { config: '{"federated":true,"strategy":"code"}' },
-      ],
+      'UPDATE sources': [{ id: 'gstack' }],
     });
     await runSources(engine, ['set-strategy', 'gstack', 'unset']);
-    const upd = calls.find(c => c.sql.includes('UPDATE sources SET config'));
-    expect(JSON.parse(upd!.params[0] as string)).toEqual({ federated: true });
+    const upd = calls.find(c => /UPDATE sources\s+SET config/.test(c.sql));
+    expect(upd).toBeDefined();
+    expect(upd!.sql).toContain("- 'strategy'");
+    expect(upd!.params).toEqual(['gstack']);
+    expect(calls).toHaveLength(1);
   });
 });

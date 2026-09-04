@@ -12,6 +12,43 @@ import type { Check } from '../../doctor.ts';
 const _resolveEnvNumber = resolveEnvNumber;
 
 /**
+ * A clean supervisor exit is healthy only when the durable queue is known to
+ * be empty. Connectionless or failed probes stay advisory rather than turning
+ * absence of evidence into a false all-clear.
+ */
+export function classifyCleanSupervisorShutdown(
+  stoppedAt: string,
+  queueState: number | 'unavailable' | 'not_checked',
+): Check {
+  if (typeof queueState === 'number' && queueState > 0) {
+    return {
+      name: 'supervisor',
+      status: 'warn',
+      message: `Supervisor stopped cleanly at ${stoppedAt}, but ${queueState} job(s) are waiting. Restart with: gbrain jobs supervisor start --detach`,
+    };
+  }
+  if (queueState === 'unavailable') {
+    return {
+      name: 'supervisor',
+      status: 'warn',
+      message: `Supervisor stopped cleanly at ${stoppedAt}, but queued-job state could not be verified. Restore DB access, then run gbrain doctor again before leaving it stopped.`,
+    };
+  }
+  if (queueState === 'not_checked') {
+    return {
+      name: 'supervisor',
+      status: 'warn',
+      message: `Supervisor stopped cleanly at ${stoppedAt}, but queue state was not checked on this connectionless run. Run gbrain doctor without --fast before relying on the shutdown as healthy.`,
+    };
+  }
+  return {
+    name: 'supervisor',
+    status: 'ok',
+    message: `Supervisor intentionally stopped at ${stoppedAt} (clean shutdown); no waiting jobs require a restart.`,
+  };
+}
+
+/**
  * v0.41.18.0 batch_retry_health doctor check (codex H-9 thresholds).
  *
  * Surfaces sustained Supavisor circuit-breaker incidents from the

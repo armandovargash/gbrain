@@ -93,7 +93,7 @@ export {
   computeWedgedQueueCheck,
   computeOrphanedPrivateQueueCheck,
   computeAutopilotFanoutConcurrencyCheck,
-  checkBatchRetryHealth,
+  checkBatchRetryHealth, classifyCleanSupervisorShutdown,
 } from './doctor/checks/queue-jobs.ts';
 export {
   checkGraphSignalsCoverage,
@@ -184,7 +184,7 @@ import {
   computeWedgedQueueCheck,
   computeOrphanedPrivateQueueCheck,
   computeAutopilotFanoutConcurrencyCheck,
-  checkBatchRetryHealth,
+  checkBatchRetryHealth, classifyCleanSupervisorShutdown,
 } from './doctor/checks/queue-jobs.ts';
 import {
   checkGraphSignalsCoverage,
@@ -1020,6 +1020,19 @@ export async function buildChecks(
     const crashes24h = summary.total;
     const causeStr = `runtime=${summary.by_cause.runtime_error} oom=${summary.by_cause.oom_or_external_kill} rss=${summary.by_cause.rss_watchdog} unknown=${summary.by_cause.unknown} legacy=${summary.by_cause.legacy}${summary.by_cause.rss_watchdog > 0 ? ' (see worker_oom_loop)' : ''}`;
     const maxCrashesEvent = events.filter(e => e.event === 'max_crashes_exceeded').pop() ?? null;
+    let stoppedQueueState: number | 'unavailable' | 'not_checked' = 'not_checked';
+    if (!running && stoppedCleanly && engine) {
+      try {
+        const rows = await engine.executeRaw<{ waiting: string | number }>(
+          `SELECT count(*)::int AS waiting
+             FROM minion_jobs
+            WHERE status = 'waiting'`,
+        );
+        stoppedQueueState = Number(rows[0]?.waiting ?? 0);
+      } catch {
+        stoppedQueueState = 'unavailable';
+      }
+    }
 
     // Only surface a Check if the supervisor was ever observed (stops the
     // "never used the supervisor" install from getting a warn about it).
@@ -1031,11 +1044,7 @@ export async function buildChecks(
           message: `Supervisor gave up at ${maxCrashesEvent.ts} (max_crashes_exceeded). Restart with: gbrain jobs supervisor start --detach`,
         });
       } else if (!running && stoppedCleanly) {
-        checks.push({
-          name: 'supervisor',
-          status: 'ok',
-          message: `Supervisor intentionally stopped at ${lastLifecycleEvent.ts} (clean shutdown); no restart required unless jobs are queued.`,
-        });
+        checks.push(classifyCleanSupervisorShutdown(lastLifecycleEvent.ts, stoppedQueueState));
       } else if (!running && dbLockCheckSkippedUnderFast && events.length > 0) {
         // #4518: pidfile check found nothing at the HOME-derived default
         // path, but under --fast we never got to try the #1849 DB-lock

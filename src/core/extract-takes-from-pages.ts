@@ -140,7 +140,9 @@ export async function extractTakesFromPages(
     };
   }
 
-  if (!isAvailable('chat')) {
+  // Gate the model this extraction will actually call. A task override may be
+  // servable even when the process-wide chat model is not (or vice versa).
+  if (!isAvailable('chat', opts.model)) {
     return {
       pages_scanned: 0,
       claims_extracted: 0,
