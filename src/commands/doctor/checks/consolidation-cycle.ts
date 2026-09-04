@@ -6,6 +6,7 @@
  */
 import type { BrainEngine } from '../../../core/engine.ts';
 import { resolveHoursEnv } from '../../../core/env-number.ts';
+import { isCodeSourceConfig } from '../../../core/source-purpose.ts';
 import type { Check } from '../../doctor.ts';
 
 /** Local alias; the shared warn-once memo lives in core so it can't fork per module. */
@@ -146,7 +147,8 @@ export async function checkCycleFreshness(
   opts?: { nowMs?: number },
 ): Promise<Check> {
   try {
-    const sources = await engine.listAllSources({ localPathOnly: true });
+    const sources = (await engine.listAllSources({ localPathOnly: true }))
+      .filter((source) => !isCodeSourceConfig(source.config));
     if (sources.length === 0) {
       return {
         name: 'cycle_freshness',
@@ -234,4 +236,3 @@ export async function checkCycleFreshness(
     };
   }
 }
-

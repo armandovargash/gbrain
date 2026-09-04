@@ -145,6 +145,20 @@ describe('computeExtractAtomsBacklogCheck (issue #1678)', () => {
     expect(fix).not.toContain(') (or declare');
     expect(check.message).toContain(fix);
   });
+
+  it('excludes code-source pages because code graph health owns their readiness', async () => {
+    await addSource(engine, { id: 'code-index' });
+    await engine.executeRaw(
+      `UPDATE sources SET config = '{"strategy":"code"}'::jsonb WHERE id = 'code-index'`,
+    );
+    for (let i = 0; i < 12; i++) await seedArticle(`code-article-${i}`, 'code-index');
+
+    expect(await countExtractAtomsBacklog(engine, 'code-index')).toBe(12);
+    const check = await withEnv({ GBRAIN_HOME: EMPTY_HOME }, () =>
+      computeExtractAtomsBacklogCheck(engine));
+    expect(check.status).toBe('ok');
+    expect((check.details as { backlog: number }).backlog).toBe(0);
+  });
 });
 
 // ---------------------------------------------------------------------------

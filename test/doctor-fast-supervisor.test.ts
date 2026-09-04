@@ -67,4 +67,17 @@ describe('#4518: supervisor check under --fast with no default-path pidfile', ()
       expect(check?.message).toContain('Supervisor not running');
     });
   });
+
+  test('a clean shutdown after the last start is healthy, not a restart warning', async () => {
+    await withIsolatedHome(async () => {
+      writeSupervisorEvent({ event: 'started', ts: '2026-09-04T08:00:00.000Z' }, 12345);
+      writeSupervisorEvent({ event: 'shutting_down', ts: '2026-09-04T08:01:00.000Z', reason: 'SIGTERM', exit_code: 0 }, 12345);
+
+      const checks = await buildChecks(null, []);
+      const check = supervisorCheck(checks);
+      expect(check?.status).toBe('ok');
+      expect(check?.message).toContain('intentionally stopped');
+      expect(check?.message).not.toContain('Restart with');
+    });
+  });
 });

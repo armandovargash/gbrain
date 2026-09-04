@@ -60,6 +60,7 @@ import { DEFAULT_EMBEDDING_MODEL, DEFAULT_EMBEDDING_DIMENSIONS } from './ai/defa
 import { DELETE_BATCH_SIZE, TRAVERSE_PATH_ROW_CAP } from './engine-constants.ts';
 import { PageMissingError } from './engine-errors.ts';
 import { SOURCE_CONFIG_OBJECT_SQL } from './source-config-sql.ts';
+import { ACTIVE_MEMORY_PAGE_SQL } from './source-purpose.ts';
 import { MARKDOWN_CHUNKER_VERSION } from './chunkers/recursive.ts';
 import { acquireLock, releaseLock, type LockHandle } from './pglite-lock.ts';
 // Engine-live path (#3596): static import, never a lazy `import()` in the
@@ -3315,10 +3316,9 @@ export class PGLiteEngine implements BrainEngine {
     if (opts?.sourceId !== undefined) {
       params.push(opts.sourceId);
       conds.push(`p.source_id = $${params.length}`);
-    }
+    } else conds.push(ACTIVE_MEMORY_PAGE_SQL);
     return { where: conds.join(' AND '), params };
   }
-
   /** S2: quoted identifier of the registry-ACTIVE embedding column for the
    *  stale/invalidate/health plane — read-only sites pass fallbackToLegacy
    *  so a broken registry row can't crash diagnostics (writes/invalidation
@@ -3383,7 +3383,7 @@ export class PGLiteEngine implements BrainEngine {
     if (opts.sourceId !== undefined) {
       params.push(opts.sourceId);
       srcClause = ` AND p.source_id = $${params.length}`;
-    }
+    } else srcClause = ` AND ${ACTIVE_MEMORY_PAGE_SQL}`;
     const sigClause = opts.includeNullSignature
       ? `(p.embedding_signature IS NULL OR p.embedding_signature <> $1)`
       : `p.embedding_signature IS NOT NULL
@@ -3417,7 +3417,7 @@ export class PGLiteEngine implements BrainEngine {
     if (opts?.sourceId !== undefined) {
       params.push(opts.sourceId);
       srcClause = ` AND p.source_id = $${params.length}`;
-    }
+    } else srcClause = ` AND ${ACTIVE_MEMORY_PAGE_SQL}`;
     const { rows } = await this.db.query(
       `UPDATE content_chunks cc
           SET ${colId} = NULL, embedded_at = NULL, embedded_text_hash = NULL
@@ -3463,7 +3463,7 @@ export class PGLiteEngine implements BrainEngine {
              FROM content_chunks cc
              JOIN pages p ON p.id = cc.page_id
             WHERE cc.${staleColId} IS NULL
-              AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip')
+              AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip') AND ${ACTIVE_MEMORY_PAGE_SQL}
             ORDER BY p.updated_at DESC NULLS LAST, p.id ASC, cc.chunk_index ASC
             LIMIT $1`,
           [limit],
@@ -3474,7 +3474,7 @@ export class PGLiteEngine implements BrainEngine {
              FROM content_chunks cc
              JOIN pages p ON p.id = cc.page_id
             WHERE cc.${staleColId} IS NULL
-              AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip')
+              AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip') AND ${ACTIVE_MEMORY_PAGE_SQL}
               AND (
                 p.updated_at < $1::timestamptz
                 OR (p.updated_at = $1::timestamptz AND p.id > $2)
@@ -3530,7 +3530,7 @@ export class PGLiteEngine implements BrainEngine {
            FROM content_chunks cc
            JOIN pages p ON p.id = cc.page_id
           WHERE cc.${staleColId} IS NULL
-            AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip')
+            AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip') AND ${ACTIVE_MEMORY_PAGE_SQL}
             AND (cc.page_id, cc.chunk_index) > ($1, $2)
           ORDER BY cc.page_id, cc.chunk_index
           LIMIT $3`,
@@ -3574,7 +3574,7 @@ export class PGLiteEngine implements BrainEngine {
     if (opts?.sourceId) {
       params.push(opts.sourceId);
       conds.push(`p.source_id = $${params.length}`);
-    }
+    } else conds.push(ACTIVE_MEMORY_PAGE_SQL);
     return { where: conds.join(' AND '), params };
   }
 
@@ -3646,14 +3646,14 @@ export class PGLiteEngine implements BrainEngine {
     if (opts?.sourceId) {
       params.push(opts.sourceId);
       conds.push(`source_id = $${params.length}`);
-    }
+    } else conds.push(ACTIVE_MEMORY_PAGE_SQL);
     return { where: conds.join(' AND '), params };
   }
 
   async countStalePagesForExtraction(opts?: { sourceId?: string; versionTs?: string }): Promise<number> {
     const { where, params } = this.buildStalePagesWhere(opts);
     const { rows } = await this.db.query<{ count: number }>(
-      `SELECT count(*)::int AS count FROM pages WHERE ${where}`,
+      `SELECT count(*)::int AS count FROM pages p WHERE ${where}`,
       params,
     );
     return rows[0]?.count ?? 0;
@@ -3678,7 +3678,7 @@ export class PGLiteEngine implements BrainEngine {
       // as postgres-engine.ts so extractStaleFromDB stamps the exact updated_at.
       `SELECT id, slug, source_id, type, title, compiled_truth, timeline, frontmatter, updated_at,
               to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS updated_at_iso
-         FROM pages
+         FROM pages p
          WHERE ${where}${afterClause}
          ORDER BY id
          LIMIT $${limitIdx}`,

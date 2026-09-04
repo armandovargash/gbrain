@@ -87,6 +87,15 @@ describe('reapDeadHolderLocks', () => {
     expect(await lockIds()).toEqual([]);
   });
 
+  test('reaps dead embedding migration and backfill writer locks', async () => {
+    await seedLock('gbrain-embedding-migration', 900004, LOCAL, OLD_S, false);
+    await seedLock('gbrain-embed-backfill:source-a', 900005, LOCAL, OLD_S, false);
+
+    const { reapedIds } = await reapDeadHolderLocks(engine, killSeam(new Set()));
+    expect(reapedIds.sort()).toEqual(['gbrain-embed-backfill:source-a', 'gbrain-embedding-migration']);
+    expect(await lockIds()).toEqual([]);
+  });
+
   test('keeps a live same-host holder', async () => {
     await seedLock('gbrain-sync:src-live', process.pid, LOCAL, OLD_S);
     const { reaped } = await reapDeadHolderLocks(engine, killSeam(new Set([process.pid])));

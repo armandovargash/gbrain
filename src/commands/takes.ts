@@ -711,7 +711,7 @@ async function cmdExtract(engine: BrainEngine, rest: string[]): Promise<void> {
   const sub = rest[0];
   if (sub !== '--from-pages') {
     process.stderr.write(
-      'Usage: gbrain takes extract --from-pages [--yes] [--dry-run] [--json] [--source-id <id>] [--max-pages N (clamped to 1000)] [--include-covered] [--holder <name>]\n' +
+      'Usage: gbrain takes extract --from-pages [--yes] [--dry-run] [--json] [--model <provider:model>] [--source-id <id>] [--max-pages N (clamped to 1000)] [--include-covered] [--holder <name>]\n' +
       'Runs progress: pages that already hold takes are skipped, so repeat runs sweep a large corpus in slices. --include-covered rescans everything (refresh).\n',
     );
     process.exit(1);
@@ -726,6 +726,12 @@ async function cmdExtract(engine: BrainEngine, rest: string[]): Promise<void> {
   const maxPages = maxPagesRaw ? Math.max(1, Math.min(1000, parseInt(maxPagesRaw, 10) || 50)) : 50;
   const holderIdx = rest.indexOf('--holder');
   const holder = holderIdx >= 0 ? rest[holderIdx + 1] : 'system';
+  const modelIdx = rest.indexOf('--model');
+  const model = modelIdx >= 0 ? rest[modelIdx + 1] : undefined;
+  if (modelIdx >= 0 && (!model || model.startsWith('--'))) {
+    process.stderr.write('takes extract: --model requires <provider:model>.\n');
+    process.exit(1);
+  }
   const includeCovered = rest.includes('--include-covered');
 
   // A12 consent gate.
@@ -741,12 +747,14 @@ async function cmdExtract(engine: BrainEngine, rest: string[]): Promise<void> {
     // Name the model the extraction actually uses (extract-takes-from-pages
     // resolves getChatModel()), not a hardcoded "Haiku" — the gateway may be
     // unconfigured at this consent gate, so resolve defensively.
-    let modelLabel = 'the configured chat model';
-    try {
-      const { getChatModel } = await import('../core/ai/gateway.ts');
-      modelLabel = getChatModel();
-    } catch {
-      // Gateway unconfigured — keep the generic label.
+    let modelLabel = model ?? 'the configured chat model';
+    if (!model) {
+      try {
+        const { getChatModel } = await import('../core/ai/gateway.ts');
+        modelLabel = getChatModel();
+      } catch {
+        // Gateway unconfigured — keep the generic label.
+      }
     }
     process.stderr.write(
       `[takes extract] sends concept/atom/lore/briefing/writing/originals page content to ${modelLabel}.\n` +
@@ -763,6 +771,7 @@ async function cmdExtract(engine: BrainEngine, rest: string[]): Promise<void> {
     maxPages,
     includeCovered,
     holder,
+    model,
   });
   if (result.llm_unavailable) {
     if (json) {

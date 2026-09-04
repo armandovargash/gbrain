@@ -116,6 +116,15 @@ describe('content_hash_duplicates (#2250)', () => {
     expect((c.details as any).distinct_slug_group_count).toBe(1);
   });
 
+  test('canonical plus raw-sources mirror is intentional provenance, not a duplicate warning', async () => {
+    await addPage('decisions/example', { hash: 'same' });
+    await addPage('raw-sources/decisions/example', { hash: 'same' });
+    const c = await checkContentHashDuplicates(engine);
+    expect(c.status).toBe('ok');
+    expect(c.message).toContain('intentional provenance pairs');
+    expect((c.details as any).raw_mirror_count).toBe(1);
+  });
+
   test('#3946: two distinct bare slugs with same hash → warn without delete hint', async () => {
     await addPage('alice-example', { hash: 'same' });
     await addPage('alice-copy', { hash: 'same' });

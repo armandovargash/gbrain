@@ -75,6 +75,12 @@ describe('getHealth source-purpose isolation', () => {
     const codeOnly = await engine.getHealth({ sourceId: 'code-worktree' });
     expect(codeOnly.page_count).toBe(0);
     expect(codeOnly.brain_score).toBe(100);
+
+    // Unscoped embed/migration work follows the same source-purpose contract.
+    expect(await engine.countStaleChunks()).toBe(0);
+    expect(await engine.countStaleChunks({ sourceId: 'code-worktree' })).toBe(1);
+    expect(await engine.listStaleChunks()).toHaveLength(0);
+    expect(await engine.listStaleChunks({ sourceId: 'code-worktree' })).toHaveLength(1);
   });
 
   test('an archived knowledge source cannot dilute active health', async () => {
@@ -100,5 +106,20 @@ describe('getHealth source-purpose isolation', () => {
     expect(after.page_count).toBe(before.page_count);
     expect(after.missing_embeddings).toBe(before.missing_embeddings);
     expect(after.brain_score).toBe(before.brain_score);
+    expect(await engine.countStaleChunks()).toBe(0);
+    expect(await engine.countStaleChunks({ sourceId: 'old-memory' })).toBe(1);
+  });
+
+  test('unscoped chunkless healing excludes code sources', async () => {
+    await engine.executeRaw(`
+      INSERT INTO sources (id, name, config)
+      VALUES ('code-worktree', 'code-worktree', '{"federated":true,"strategy":"code"}'::jsonb)
+    `);
+    await engine.putPage('src/chunkless-ts', {
+      type: 'code', title: 'src/chunkless.ts', compiled_truth: 'export const chunkless = true;',
+    }, { sourceId: 'code-worktree' });
+
+    expect(await engine.countChunklessPagesWithContent()).toBe(0);
+    expect(await engine.countChunklessPagesWithContent({ sourceId: 'code-worktree' })).toBe(1);
   });
 });

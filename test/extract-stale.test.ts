@@ -55,6 +55,20 @@ describe('engine: stale-page extraction methods', () => {
     expect(await engine.countStalePagesForExtraction()).toBe(2);
   });
 
+  test('unscoped stale extraction excludes code sources but explicit scope remains available', async () => {
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, config) VALUES ('code-worktree', 'code-worktree', '{"strategy":"code"}'::jsonb)`,
+    );
+    await engine.putPage('src/example-ts', {
+      type: 'code', title: 'src/example.ts', compiled_truth: 'export const example = true;', timeline: '',
+    }, { sourceId: 'code-worktree' });
+
+    expect(await engine.countStalePagesForExtraction()).toBe(0);
+    expect(await engine.countStalePagesForExtraction({ sourceId: 'code-worktree' })).toBe(1);
+    expect(await engine.listStalePagesForExtraction({ batchSize: 10 })).toHaveLength(0);
+    expect(await engine.listStalePagesForExtraction({ batchSize: 10, sourceId: 'code-worktree' })).toHaveLength(1);
+  });
+
   test('countStalePagesForExtraction: stamped pages drop out', async () => {
     await engine.putPage('people/alice', personPage('Alice'));
     await engine.markPagesExtractedBatch([{ slug: 'people/alice', source_id: 'default' }], new Date().toISOString());

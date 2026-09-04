@@ -30,6 +30,7 @@ import {
   resolveActiveEmbeddingColumnFromEngine,
   quoteIdentifier,
 } from './search/embedding-column.ts';
+import { ACTIVE_MEMORY_PAGE_SQL } from './source-purpose.ts';
 
 /**
  * `<provider:model>:<dims>` — the one-line shape of
@@ -66,6 +67,7 @@ function falseStampPageWhere(colId: string): string {
   return `
         p.embedding_signature = $1
         AND p.deleted_at IS NULL
+        AND ${ACTIVE_MEMORY_PAGE_SQL}
         AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip')
         AND EXISTS (
           SELECT 1 FROM content_chunks c
@@ -136,6 +138,8 @@ export async function invalidateStaleSignatureEmbeddingsGuarded(
   if (opts.sourceId !== undefined) {
     params.push(opts.sourceId);
     srcClause = ` AND p.source_id = $${params.length}`;
+  } else {
+    srcClause = ` AND ${ACTIVE_MEMORY_PAGE_SQL}`;
   }
   // Mirrors the engine method's clauses (NULL-signature grandfather lifted by
   // includeNullSignature, #3391); the embed_skip predicate matches

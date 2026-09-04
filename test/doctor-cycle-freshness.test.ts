@@ -42,6 +42,19 @@ async function seed(id: string, lastFullCycleAt?: string, opts: { local_path?: s
   );
 }
 
+async function seedCodeSource(id: string, lastFullCycleAt?: string): Promise<void> {
+  const config = JSON.stringify({
+    strategy: 'code',
+    ...(lastFullCycleAt ? { last_full_cycle_at: lastFullCycleAt } : {}),
+  });
+  await engine.executeRaw(
+    `INSERT INTO sources (id, name, local_path, config, archived, created_at)
+     VALUES ($1, $2, $3, $4::jsonb, false, NOW())
+     ON CONFLICT (id) DO UPDATE SET local_path = EXCLUDED.local_path, config = EXCLUDED.config`,
+    [id, id, `/tmp/${id}`, config],
+  );
+}
+
 describe('doctor checkCycleFreshness', () => {
   test('empty (no federated sources) returns ok', async () => {
     // resetPgliteState reseeds the default source with no local_path
@@ -146,5 +159,14 @@ describe('doctor checkCycleFreshness', () => {
     const result = await checkCycleFreshness(engine, { nowMs: NOW });
     expect(result.status).toBe('ok');
     expect(result.message).toMatch(/No federated sources/);
+  });
+
+  test('code sources are excluded because graph readiness owns their health', async () => {
+    await engine.executeRaw(`UPDATE sources SET local_path = NULL WHERE id = 'default'`);
+    await seedCodeSource('code-stale', agoH(72));
+    const result = await checkCycleFreshness(engine, { nowMs: NOW });
+    expect(result.status).toBe('ok');
+    expect(result.message).toMatch(/No federated sources/);
+    expect(result.message).not.toContain('code-stale');
   });
 });

@@ -24,6 +24,11 @@ import {
 import { slugifyPath, slugifyCodePath, isCodeFilePath } from '../../../core/sync.ts';
 import { resolveSourceLocalFilePath } from '../../../core/markdown.ts';
 import { unverifiedExtractionFragment } from '../../../core/extraction-review.ts';
+import {
+  ACTIVE_MEMORY_SOURCE_SQL,
+  isCodeSourceConfig,
+  listActiveMemorySourceIds,
+} from '../../../core/source-purpose.ts';
 import type { Check } from '../../doctor.ts';
 
 /** Local aliases; the shared warn-once memo lives in core so it can't fork per module. */
@@ -101,8 +106,13 @@ export async function checkLinksExtractionLag(
   try {
     const totalRows = await engine.executeRaw<{ count: number }>(
       sourceId
-        ? `SELECT count(*)::int AS count FROM pages WHERE deleted_at IS NULL AND source_id = $1`
-        : `SELECT count(*)::int AS count FROM pages WHERE deleted_at IS NULL`,
+        ? `SELECT count(*)::int AS count
+             FROM pages p JOIN sources s ON s.id = p.source_id
+            WHERE p.deleted_at IS NULL AND p.source_id = $1
+              AND ${ACTIVE_MEMORY_SOURCE_SQL}`
+        : `SELECT count(*)::int AS count
+             FROM pages p JOIN sources s ON s.id = p.source_id
+            WHERE p.deleted_at IS NULL AND ${ACTIVE_MEMORY_SOURCE_SQL}`,
       sourceId ? [sourceId] : [],
     );
     const total = Number(totalRows[0]?.count ?? 0);
@@ -115,7 +125,11 @@ export async function checkLinksExtractionLag(
       return { name, status: 'ok', message: `Extraction lag not applicable (${total} pages — too few to assess)` };
     }
 
-    const stale = await engine.countStalePagesForExtraction({ sourceId, versionTs: LINK_EXTRACTOR_VERSION_TS });
+    const stale = sourceId
+      ? await engine.countStalePagesForExtraction({ sourceId, versionTs: LINK_EXTRACTOR_VERSION_TS })
+      : (await Promise.all((await listActiveMemorySourceIds(engine)).map((id) =>
+          engine.countStalePagesForExtraction({ sourceId: id, versionTs: LINK_EXTRACTOR_VERSION_TS }),
+        ))).reduce((sum, count) => sum + count, 0);
     const pct = (stale / total) * 100;
     const pctStr = pct.toFixed(0);
     const scope = sourceId ? ` in source '${sourceId}'` : '';
@@ -238,8 +252,21 @@ export async function checkContentHashDuplicates(engine: BrainEngine): Promise<C
     const samples: string[] = [];
     let otherGroupCount = 0;
     const otherSamples: string[] = [];
+    let rawMirrorCount = 0;
     for (const r of rows) {
       const slugs = String(r.slugs).split('|');
+      // `raw-sources/<canonical-slug>` is an explicit provenance mirror, not
+      // an accidental duplicate. It intentionally retains the imported input
+      // beside the normalized page, and both may have graph edges. Penalizing
+      // this designed pair made historical sources permanently unhealthy.
+      if (
+        slugs.length === 2 &&
+        slugs.some((slug) => slug.startsWith('raw-sources/')) &&
+        slugs.some((slug) => `raw-sources/${slug}` === slugs.find((s) => s.startsWith('raw-sources/')))
+      ) {
+        rawMirrorCount++;
+        continue;
+      }
       const bare = slugs.filter(s => !s.includes('/'));
       const prefixed = slugs.filter(s => s.includes('/'));
       if (bare.length > 0 && prefixed.length > 0) {
@@ -268,6 +295,14 @@ export async function checkContentHashDuplicates(engine: BrainEngine): Promise<C
         `no automatic delete hint (either copy may be the one links point at).`,
       );
     }
+    if (pairCount === 0 && otherGroupCount === 0) {
+      return {
+        name,
+        status: 'ok',
+        message: `${rawMirrorCount} canonical/raw-source mirror group(s), all intentional provenance pairs`,
+        details: { pair_count: 0, hash_groups: rows.length, raw_mirror_count: rawMirrorCount, distinct_slug_group_count: 0 },
+      };
+    }
     return {
       name,
       status: 'warn',
@@ -275,6 +310,7 @@ export async function checkContentHashDuplicates(engine: BrainEngine): Promise<C
       details: {
         pair_count: pairCount,
         hash_groups: rows.length,
+        raw_mirror_count: rawMirrorCount,
         sample_pairs: samples,
         distinct_slug_group_count: otherGroupCount,
         sample_distinct_slug_groups: otherSamples,
@@ -511,9 +547,9 @@ async function countExtractAtomsBacklogBySource(
   countBacklog: ExtractAtomsBacklogCounter,
 ): Promise<Array<{ source_id: string; backlog: number }> | null> {
   try {
-    const sources = await engine.executeRaw<{ source_id: string }>(
-      `SELECT DISTINCT source_id FROM pages WHERE deleted_at IS NULL ORDER BY source_id`,
-    );
+    const sources = (await engine.listAllSources())
+      .filter((source) => !isCodeSourceConfig(source.config))
+      .map((source) => ({ source_id: source.id }));
     const rows: Array<{ source_id: string; backlog: number }> = [];
     for (const src of sources) {
       const backlog = await countBacklog(engine, src.source_id);
@@ -570,7 +606,8 @@ async function latestFullCycleEvidence(
 ): Promise<FullCycleEvidence> {
   const warnHours = _resolveSyncFreshnessHours('GBRAIN_CYCLE_FRESHNESS_WARN_HOURS', 6);
   try {
-    const sources = await engine.listAllSources({ localPathOnly: true });
+    const sources = (await engine.listAllSources({ localPathOnly: true }))
+      .filter((source) => !isCodeSourceConfig(source.config));
     let latest = Number.NEGATIVE_INFINITY;
     let latestIso: string | null = null;
     for (const src of sources) {
@@ -640,7 +677,11 @@ export async function computeExtractAtomsBacklogCheck(
   const approx = 'page backlog only; transcript corpus not counted';
   try {
     const { countExtractAtomsBacklog } = await import('../../../core/cycle/extract-atoms.ts');
-    const backlog = await countExtractAtomsBacklog(engine); // brain-wide
+    const memorySourceIds = await listActiveMemorySourceIds(engine);
+    const counts = await Promise.all(memorySourceIds.map((id) => countExtractAtomsBacklog(engine, id)));
+    const backlog = counts.some((count) => count === null)
+      ? null
+      : counts.reduce<number>((sum, count) => sum + (count ?? 0), 0);
     if (backlog === null) {
       return { name, status: 'warn', message: 'backlog query failed (could not count eligible pages)' };
     }

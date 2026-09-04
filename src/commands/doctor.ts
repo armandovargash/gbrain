@@ -24,6 +24,9 @@ import { hnswIndexExpected, hnswMaxDimsForType } from '../core/vector-index.ts';
 import { VERSION as GBRAIN_BINARY_VERSION } from '../version.ts';
 import { schemaVersionHealth } from '../core/schema-version-health.ts';
 import { zeroTotalContradictionsCheck } from '../core/eval-contradictions/run-health.ts';
+import { ACTIVE_MEMORY_SOURCE_SQL } from '../core/source-purpose.ts';
+import { upgradeErrorResolved } from './doctor/checks/upgrade-readiness.ts';
+export { upgradeErrorResolved } from './doctor/checks/upgrade-readiness.ts';
 // Peeled doctor modules (containment sprint): each is a verbatim move out of
 // this file. doctor.ts re-exports every moved public symbol under its
 // original name so existing importers (tests, scripts/live-brain-first-check.ts,
@@ -417,27 +420,6 @@ export function computeDoctorReport(
  * 3, which would treat 0.31.4.1 == 0.31.4.0); a malformed version fails
  * closed (keeps warning).
  */
-export function upgradeErrorResolved(
-  failedToVersion: string,
-  binaryVersion: string,
-  schemaCurrent: boolean,
-): boolean {
-  if (!schemaCurrent) return false;
-  if (typeof failedToVersion !== 'string' || typeof binaryVersion !== 'string') return false;
-  const a = binaryVersion.replace(/^v/, '').split('.');
-  const b = failedToVersion.replace(/^v/, '').split('.');
-  if (a.length === 0 || b.length === 0) return false;
-  const len = Math.max(a.length, b.length);
-  for (let i = 0; i < len; i++) {
-    const da = parseInt(a[i] ?? '0', 10);
-    const db = parseInt(b[i] ?? '0', 10);
-    if (!Number.isFinite(da) || !Number.isFinite(db) || Number.isNaN(da) || Number.isNaN(db)) return false;
-    if (da > db) return true;
-    if (da < db) return false;
-  }
-  return true; // equal → the failed target version is now running
-}
-
 /**
  * v0.42 self_upgrade_health. Surfaces the self-upgrade mode, whether an update
  * is pending (from the cache), and any recent failed auto-upgrade attempts.
@@ -471,12 +453,24 @@ export function checkSelfUpgradeHealth(): Check {
       parts.push(`update available: ${GBRAIN_BINARY_VERSION} -> ${pendingLatest} (run: gbrain self-upgrade)`);
     }
     const failedVersions: string[] = cfg?.self_upgrade?.failed_versions ?? [];
-    if (failedVersions.length > 0) {
-      parts.push(`skipping known-bad: ${failedVersions.join(', ')}`);
+    const activeFailedVersions = failedVersions.filter(
+      (version) => !upgradeErrorResolved(version, GBRAIN_BINARY_VERSION, true),
+    );
+    if (activeFailedVersions.length > 0) {
+      parts.push(`skipping known-bad: ${activeFailedVersions.join(', ')}`);
     }
 
-    const recent = readRecentSelfUpgrades(7) as Array<{ outcome?: string; error?: string; latest?: string | null }>;
-    const failures = recent.filter((e) => e.outcome === 'failed');
+    const recent = readRecentSelfUpgrades(7) as Array<{
+      outcome?: string; error?: string; latest?: string | null; current?: string;
+    }>;
+    // A failed attempt is historical once this process is demonstrably
+    // running that target or a newer binary. Schema readiness is owned by
+    // schema_version/upgrade_errors, so keeping the old file-plane event as a
+    // WARN here would turn a recovered upgrade into a permanent false alarm.
+    const failures = recent.filter((e) =>
+      e.outcome === 'failed' &&
+      !upgradeErrorResolved(e.latest ?? e.current ?? '', GBRAIN_BINARY_VERSION, true)
+    );
     if (failures.length > 0) {
       const last = failures[failures.length - 1];
       return {
@@ -1006,6 +1000,11 @@ export async function buildChecks(
 
     const events = readSupervisorEvents({ sinceMs: 24 * 60 * 60 * 1000 });
     const lastStart = events.filter(e => e.event === 'started').pop()?.ts ?? null;
+    const lastLifecycleEvent = events.filter(
+      e => e.event === 'started' || e.event === 'shutting_down',
+    ).pop();
+    const stoppedCleanly =
+      lastLifecycleEvent?.event === 'shutting_down' && lastLifecycleEvent.exit_code === 0;
     // Shared classifier — same code path runs in `gbrain jobs supervisor
     // status` (src/commands/jobs.ts). Counts only events whose `likely_cause`
     // is NOT in the clean denylist (clean_exit, graceful_shutdown). Pre-v0.34
@@ -1030,6 +1029,12 @@ export async function buildChecks(
           name: 'supervisor',
           status: 'fail',
           message: `Supervisor gave up at ${maxCrashesEvent.ts} (max_crashes_exceeded). Restart with: gbrain jobs supervisor start --detach`,
+        });
+      } else if (!running && stoppedCleanly) {
+        checks.push({
+          name: 'supervisor',
+          status: 'ok',
+          message: `Supervisor intentionally stopped at ${lastLifecycleEvent.ts} (clean shutdown); no restart required unless jobs are queued.`,
         });
       } else if (!running && dbLockCheckSkippedUnderFast && events.length > 0) {
         // #4518: pidfile check found nothing at the HOME-derived default
@@ -1243,7 +1248,8 @@ export async function buildChecks(
     const events = readRecentStubGuardEvents({ sinceMs: 24 * 60 * 60 * 1000 });
     const fallbackCount = events.filter((e) => e.reason === 'fallback_resolution').length;
     const reasonSplit = `unprefixed=${events.length - fallbackCount}, fallback_resolution=${fallbackCount}`;
-    if (events.length > 10) {
+    const uniqueRefs = new Set(events.map((e) => `${e.source_id}\0${e.slug}`));
+    if (uniqueRefs.size > 10) {
       // Surface the top 3 slugs that hit it so operators have somewhere to start.
       const slugCounts = new Map<string, number>();
       for (const e of events) slugCounts.set(e.slug, (slugCounts.get(e.slug) ?? 0) + 1);
@@ -1254,7 +1260,7 @@ export async function buildChecks(
         name: 'stub_guard_24h',
         status: 'warn',
         message:
-          `Stub guard fired ${events.length}x in last 24h (${reasonSplit}; top: ${topSlugs}). ` +
+          `Stub guard blocked ${events.length} unsafe writes across ${uniqueRefs.size} distinct refs in last 24h (${reasonSplit}; top: ${topSlugs}). ` +
           `If this stays elevated, the prefix-expansion in resolveEntitySlug is ` +
           `missing a case. Check ~/.gbrain/audit/stub-guard-*.jsonl for the slugs ` +
           `that hit it.`,
@@ -1263,7 +1269,7 @@ export async function buildChecks(
       checks.push({
         name: 'stub_guard_24h',
         status: 'ok',
-        message: `Stub guard fired ${events.length}x in last 24h (${reasonSplit}; below WARN threshold of 10).`,
+        message: `Stub guard blocked ${events.length} unsafe writes across ${uniqueRefs.size} distinct refs in last 24h (${reasonSplit}; below WARN threshold of 10 distinct refs).`,
       });
     }
     // Zero hits is the goal — emit no check at all so the doctor output stays clean.
@@ -2165,8 +2171,12 @@ export async function buildChecks(
     } else {
       checks.push({ name: 'embeddings', status: 'warn', message: `No embeddings yet. Run: gbrain embed --stale${carveOut}` });
     }
-  } catch {
-    checks.push({ name: 'embeddings', status: 'warn', message: 'Could not check embedding health' });
+  } catch (err) {
+    checks.push({
+      name: 'embeddings',
+      status: 'warn',
+      message: `Could not check embedding health: ${err instanceof Error ? err.message : String(err)}`,
+    });
   }
 
   // 8b. Embedding provider eval — live smoke test of the configured provider.
@@ -2455,7 +2465,11 @@ export async function buildChecks(
              / NULLIF(COUNT(*), 0) * 100
            )::float AS pct,
            COUNT(*)::int AS total
-           FROM content_chunks`,
+           FROM content_chunks cc
+           JOIN pages p ON p.id = cc.page_id
+           JOIN sources s ON s.id = p.source_id
+          WHERE p.deleted_at IS NULL
+            AND ${ACTIVE_MEMORY_SOURCE_SQL}`,
         );
         const pct = covRows[0]?.pct ?? 0;
         const total = covRows[0]?.total ?? 0;
@@ -3009,7 +3023,9 @@ export async function buildChecks(
       `SELECT p.slug, p.source_id,
               octet_length(p.compiled_truth) + octet_length(COALESCE(p.timeline, '')) AS bytes
        FROM pages p
+       JOIN sources s ON s.id = p.source_id
        WHERE p.deleted_at IS NULL
+         AND ${ACTIVE_MEMORY_SOURCE_SQL}
          AND ${EMBED_SKIP_FILTER_FRAGMENT}
          AND (octet_length(p.compiled_truth) + octet_length(COALESCE(p.timeline, ''))) > $1
        ORDER BY bytes DESC
@@ -3147,9 +3163,12 @@ export async function buildChecks(
       const hardBlocked =
         summary.by_type.hard_block + summary.by_type.reject + summary.by_type.quarantine;
       const softBlocked = summary.by_type.soft_block + summary.by_type.flag;
+      // Pure WARN events are ingestion-time advisory telemetry. They do not
+      // mean content was hidden or retrieval degraded, and the live inventory
+      // checks above own whether the condition still exists. Only a hard or
+      // soft disposition represents an actionable current health issue.
       const status: 'ok' | 'warn' | 'fail' =
-        hardBlocked > 0 ? 'fail' :
-          (softBlocked > 0 || events.length >= 10) ? 'warn' : 'ok';
+        hardBlocked > 0 ? 'fail' : softBlocked > 0 ? 'warn' : 'ok';
       checks.push({
         name: 'content_sanity_audit_recent',
         status,

@@ -66,6 +66,24 @@ describe('checkSelfUpgradeHealth', () => {
     });
   });
 
+  test('failure for an older target is resolved by the running binary', async () => {
+    await withHome(() => {
+      logSelfUpgrade({ channel: 'autopilot', action: 'apply', current: '0.1.0', latest: '0.1.1', outcome: 'failed', error: 'old failure' });
+      const c = checkSelfUpgradeHealth();
+      expect(c.status).toBe('ok');
+      expect(c.message).not.toContain('self-upgrade failure');
+    });
+  });
+
+  test('legacy failure without latest is resolved when current has advanced', async () => {
+    await withHome(() => {
+      logSelfUpgrade({ channel: 'autopilot', action: 'apply', current: '0.1.0', outcome: 'failed', error: 'legacy failure' });
+      const c = checkSelfUpgradeHealth();
+      expect(c.status).toBe('ok');
+      expect(c.message).not.toContain('self-upgrade failure');
+    });
+  });
+
   test('known-bad versions in config are surfaced', async () => {
     await withHome((home) => {
       mkdirSync(join(home, '.gbrain'), { recursive: true });

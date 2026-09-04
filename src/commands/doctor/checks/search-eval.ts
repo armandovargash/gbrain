@@ -10,6 +10,7 @@ import { loadConfig, type GBrainConfig } from '../../../core/config.ts';
 // Leaf module (no flag surface of its own) — see that file for why this
 // isn't imported from extract-conversation-facts.ts directly (#4135).
 import { ALLOWED_TYPES } from '../../../core/facts/conversation-types.ts';
+import { ACTIVE_MEMORY_SOURCE_SQL } from '../../../core/source-purpose.ts';
 
 function hasNonEmptyChatFallbackChain(value: unknown): boolean {
   if (Array.isArray(value)) {
@@ -636,6 +637,7 @@ export async function computeConversationFactsBacklogCheck(
            MAX(CASE WHEN f.source = 'cli:extract-conversation-facts:terminal:v2' THEN 1 ELSE 0 END) AS completed,
            MAX(CASE WHEN f.source = 'cli:extract-conversation-facts:non-extractable:v2' THEN 1 ELSE 0 END) AS non_extractable
          FROM pages p
+         JOIN sources s ON s.id = p.source_id
          LEFT JOIN facts f
            ON f.source_id = p.source_id
           AND f.source_markdown_slug = p.slug
@@ -649,6 +651,7 @@ export async function computeConversationFactsBacklogCheck(
             COALESCE(TO_CHAR(p.effective_date AT TIME ZONE 'UTC', 'YYYY-MM-DD'), 'none')
          WHERE p.type = ANY($1::text[])
            AND p.deleted_at IS NULL
+           AND ${ACTIVE_MEMORY_SOURCE_SQL}
            AND COALESCE(BTRIM(p.frontmatter->>'raw_transcript'), '') = ''
            AND p.content_hash IS NOT NULL
          GROUP BY p.source_id, p.slug
@@ -672,15 +675,17 @@ export async function computeConversationFactsBacklogCheck(
       '../../extract-conversation-facts.ts'
     );
     const verifierSources = await engine.executeRaw<{ source_id: string }>(
-      `SELECT DISTINCT source_id
-         FROM pages
-        WHERE type = ANY($1::text[])
-          AND deleted_at IS NULL
+      `SELECT DISTINCT p.source_id
+         FROM pages p
+         JOIN sources s ON s.id = p.source_id
+        WHERE p.type = ANY($1::text[])
+          AND p.deleted_at IS NULL
+          AND ${ACTIVE_MEMORY_SOURCE_SQL}
           AND (
-            COALESCE(BTRIM(frontmatter->>'raw_transcript'), '') <> ''
-            OR content_hash IS NULL
+            COALESCE(BTRIM(p.frontmatter->>'raw_transcript'), '') <> ''
+            OR p.content_hash IS NULL
           )
-        ORDER BY source_id`,
+        ORDER BY p.source_id`,
       [types],
     );
     for (const { source_id: sourceId } of verifierSources) {

@@ -91,6 +91,7 @@ import { DEFAULT_EMBEDDING_MODEL, DEFAULT_EMBEDDING_DIMENSIONS } from './ai/defa
 import { DELETE_BATCH_SIZE, TRAVERSE_PATH_ROW_CAP } from './engine-constants.ts';
 import { PageMissingError } from './engine-errors.ts';
 import { SOURCE_CONFIG_OBJECT_SQL } from './source-config-sql.ts';
+import { ACTIVE_MEMORY_PAGE_SQL } from './source-purpose.ts';
 import { shouldExcludeFromOrphanReporting, loadOrphanPolicyOverrides } from './orphan-policy.ts';
 import { LINK_EXTRACTOR_VERSION_TS } from './link-extraction.ts';
 import { EMBED_SKIP_FILTER_FRAGMENT } from './embed-skip.ts';
@@ -2547,10 +2548,9 @@ export class PostgresEngine implements BrainEngine {
     if (opts?.sourceId !== undefined) {
       params.push(opts.sourceId);
       conds.push(`p.source_id = $${params.length}`);
-    }
+    } else conds.push(ACTIVE_MEMORY_PAGE_SQL);
     return { where: conds.join(' AND '), params };
   }
-
   /** S2: quoted identifier of the registry-ACTIVE embedding column for the
    *  stale/invalidate/health plane — read-only sites pass fallbackToLegacy
    *  so a broken registry row can't crash diagnostics (writes/invalidation
@@ -2616,7 +2616,7 @@ export class PostgresEngine implements BrainEngine {
     if (opts.sourceId !== undefined) {
       params.push(opts.sourceId);
       srcClause = ` AND p.source_id = $${params.length}`;
-    }
+    } else srcClause = ` AND ${ACTIVE_MEMORY_PAGE_SQL}`;
     const sigClause = opts.includeNullSignature
       ? `(p.embedding_signature IS NULL OR p.embedding_signature <> $1)`
       : `p.embedding_signature IS NOT NULL
@@ -2650,7 +2650,7 @@ export class PostgresEngine implements BrainEngine {
     if (opts?.sourceId !== undefined) {
       params.push(opts.sourceId);
       srcClause = ` AND p.source_id = $${params.length}`;
-    }
+    } else srcClause = ` AND ${ACTIVE_MEMORY_PAGE_SQL}`;
     const sql = this.sql;
     const rows = await sql.unsafe(
       `UPDATE content_chunks cc
@@ -2701,7 +2701,7 @@ export class PostgresEngine implements BrainEngine {
             FROM content_chunks cc
             JOIN pages p ON p.id = cc.page_id
             WHERE cc.${tx.unsafe(staleColId)} IS NULL
-              AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip')
+              AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip') AND ${tx.unsafe(ACTIVE_MEMORY_PAGE_SQL)}
             ORDER BY p.updated_at DESC NULLS LAST, p.id ASC, cc.chunk_index ASC
             LIMIT ${limit}
           ` : await tx`
@@ -2711,7 +2711,7 @@ export class PostgresEngine implements BrainEngine {
             FROM content_chunks cc
             JOIN pages p ON p.id = cc.page_id
             WHERE cc.${tx.unsafe(staleColId)} IS NULL
-              AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip')
+              AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip') AND ${tx.unsafe(ACTIVE_MEMORY_PAGE_SQL)}
               AND (
                 p.updated_at < ${afterUpdated}::timestamptz
                 OR (p.updated_at = ${afterUpdated}::timestamptz AND p.id > ${afterPid})
@@ -2760,7 +2760,7 @@ export class PostgresEngine implements BrainEngine {
           FROM content_chunks cc
           JOIN pages p ON p.id = cc.page_id
           WHERE cc.${tx.unsafe(staleColId)} IS NULL
-            AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip')
+            AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip') AND ${tx.unsafe(ACTIVE_MEMORY_PAGE_SQL)}
             AND (cc.page_id, cc.chunk_index) > (${afterPid}, ${afterIdx})
           ORDER BY cc.page_id, cc.chunk_index
           LIMIT ${limit}
@@ -2803,7 +2803,7 @@ export class PostgresEngine implements BrainEngine {
     if (opts?.sourceId) {
       params.push(opts.sourceId);
       conds.push(`p.source_id = $${params.length}`);
-    }
+    } else conds.push(ACTIVE_MEMORY_PAGE_SQL);
     return { where: conds.join(' AND '), params };
   }
 
@@ -2879,7 +2879,7 @@ export class PostgresEngine implements BrainEngine {
     if (opts?.sourceId) {
       params.push(opts.sourceId);
       conds.push(`source_id = $${params.length}`);
-    }
+    } else conds.push(ACTIVE_MEMORY_PAGE_SQL);
     return { where: conds.join(' AND '), params };
   }
 
@@ -2888,7 +2888,7 @@ export class PostgresEngine implements BrainEngine {
     // RLS scope binding (opt-in via GBRAIN_RLS_SCOPE_BINDING).
     return await this.withScopedReadTransaction(undefined, opts?.sourceId, async (tx) => {
       const rows = await tx.unsafe(
-        `SELECT count(*)::int AS count FROM pages WHERE ${where}`,
+        `SELECT count(*)::int AS count FROM pages p WHERE ${where}`,
         params as Parameters<typeof tx.unsafe>[1],
       );
       return Number((rows[0] as { count?: number } | undefined)?.count ?? 0);
@@ -2917,7 +2917,7 @@ export class PostgresEngine implements BrainEngine {
         // links_extracted_at = the exact updated_at and the staleness predicate clears.
         `SELECT id, slug, source_id, type, title, compiled_truth, timeline, frontmatter, updated_at,
                 to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS updated_at_iso
-           FROM pages
+           FROM pages p
            WHERE ${where}${afterClause}
            ORDER BY id
            LIMIT $${limitIdx}`,

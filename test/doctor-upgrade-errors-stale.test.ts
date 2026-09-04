@@ -40,6 +40,8 @@ describe('upgradeErrorResolved (#4517)', () => {
   test('fails closed on malformed versions (keeps warning)', () => {
     expect(upgradeErrorResolved('garbage', '0.46.28.0', true)).toBe(false);
     expect(upgradeErrorResolved('0.46.10.0', 'garbage', true)).toBe(false);
+    expect(upgradeErrorResolved('0.46.10beta.0', '0.46.28.0', true)).toBe(false);
+    expect(upgradeErrorResolved('0.46.10.0', '0.46.28rc1.0', true)).toBe(false);
     expect(upgradeErrorResolved(undefined as unknown as string, '0.46.28.0', true)).toBe(false);
   });
 });

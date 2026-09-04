@@ -812,8 +812,9 @@ export async function deleteLockRowExact(
  * sweep. Intended to run at cycle start (and under `gbrain doctor --fix` for
  * no-autopilot brains).
  *
- * Scoped to the `gbrain-sync:*` and `gbrain-cycle`/`gbrain-cycle:*` namespaces
- * ONLY. `gbrain_cycle_locks` is shared by enrich, the minion supervisor,
+ * Scoped to the writer locks whose holders are ordinary local processes:
+ * sync/cycle, embedding migration, and per-source embed backfills.
+ * `gbrain_cycle_locks` is also shared by enrich, the minion supervisor,
  * reindex, schema-pack, and elections (`tryWithDbElection`) — a blanket sweep
  * would change their TTL-failover timing. Those keep their existing
  * on-contention + TTL behavior.
@@ -832,7 +833,9 @@ function isReapableNamespace(lockId: string): boolean {
   return (
     lockId === 'gbrain-cycle' ||
     lockId.startsWith('gbrain-cycle:') ||
-    lockId.startsWith('gbrain-sync:')
+    lockId.startsWith('gbrain-sync:') ||
+    lockId === 'gbrain-embedding-migration' ||
+    lockId.startsWith('gbrain-embed-backfill:')
   );
 }
 
