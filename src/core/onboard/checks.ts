@@ -48,6 +48,12 @@ async function safeCount(engine: BrainEngine, sql: string, params: unknown[] = [
 
 const VISIBLE_ENTITY_PREDICATE = `p.type IN ('person', 'company', 'organization', 'entity')
   AND p.deleted_at IS NULL
+  AND EXISTS (
+    SELECT 1 FROM sources s
+    WHERE s.id = p.source_id
+      AND s.archived IS NOT TRUE
+      AND COALESCE(s.config->>'strategy', '') <> 'code'
+  )
   AND ${QUARANTINE_FILTER_FRAGMENT}`;
 
 type CoverageFeature =
@@ -128,7 +134,14 @@ export async function checkEmbedStaleness(
 ): Promise<OnboardCheckResult> {
   const staleCount = await safeCount(
     engine,
-    `SELECT COUNT(*) AS count FROM content_chunks WHERE embedding IS NULL`,
+    `SELECT COUNT(*) AS count
+       FROM content_chunks c
+       JOIN pages p ON p.id = c.page_id
+       JOIN sources s ON s.id = p.source_id
+      WHERE c.embedding IS NULL
+        AND p.deleted_at IS NULL
+        AND s.archived IS NOT TRUE
+        AND COALESCE(s.config->>'strategy', '') <> 'code'`,
   );
   const remediations: RemediationStep[] = [];
   let status: 'ok' | 'warn' | 'fail' = 'ok';
@@ -359,8 +372,11 @@ export async function checkTimelineCoverage(
     // (it skips meetings without effective_date) and the rec never clears.
     const datableMeetings = await safeCount(
       engine,
-      `SELECT COUNT(*) AS count FROM pages
-         WHERE type = 'meeting' AND effective_date IS NOT NULL AND deleted_at IS NULL`,
+      `SELECT COUNT(*) AS count FROM pages p
+         JOIN sources s ON s.id = p.source_id
+        WHERE p.type = 'meeting' AND p.effective_date IS NOT NULL AND p.deleted_at IS NULL
+          AND s.archived IS NOT TRUE
+          AND COALESCE(s.config->>'strategy', '') <> 'code'`,
     );
     if (datableMeetings > 0) {
       remediations.push(makeRemediationStep({
@@ -570,7 +586,12 @@ export async function checkTypeProliferation(
   }
   const n = await safeCount(
     engine,
-    `SELECT COUNT(DISTINCT type) AS count FROM pages WHERE deleted_at IS NULL AND type IS NOT NULL`,
+    `SELECT COUNT(DISTINCT p.type) AS count
+       FROM pages p
+       JOIN sources s ON s.id = p.source_id
+      WHERE p.deleted_at IS NULL AND p.type IS NOT NULL
+        AND s.archived IS NOT TRUE
+        AND COALESCE(s.config->>'strategy', '') <> 'code'`,
   );
   const warn = declared + 5;
   const fail = declared * 2;
