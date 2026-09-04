@@ -4097,7 +4097,9 @@ export async function buildChecks(
     // for embed_staleness, TABLESAMPLE on PG >50K for the coverage pair).
     progress.heartbeat('onboard_checks');
     const { runAllOnboardChecks } = await import('../core/onboard/checks.ts');
-    const onboardResults = await runAllOnboardChecks(engine);
+    const onboardResults = await runAllOnboardChecks(engine, {
+      onSettled: (name) => progress.heartbeat(`onboard_checks.${name}`),
+    });
     for (const r of onboardResults) checks.push(r.check);
   }
 

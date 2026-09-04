@@ -456,26 +456,36 @@ export async function checkTakesCount(
 }
 
 /**
- * Run all four checks in parallel; aggregate into a single payload.
+ * Run all checks sequentially; aggregate into a single payload.
  * Consumed by onboard's plan generation + (later) doctor's runDoctor.
  *
- * Per A20: callers can race this against an AbortSignal-bound timer for
- * partial-results fallthrough. Each individual safeCount() returns 0
- * on throw so a single check failure doesn't break the aggregate.
+ * Sequential execution is deliberate. The corporate launcher constrains
+ * postgres.js to two connections so multiple agent sessions cannot exhaust a
+ * small Supavisor pool. Fan-out here used to strand the final doctor phase
+ * behind its own queued reads. These checks take under a second sequentially,
+ * and each safeCount() already fails open independently.
  */
 export async function runAllOnboardChecks(
   engine: BrainEngine,
+  opts?: { onSettled?: (name: string) => void },
 ): Promise<OnboardCheckResult[]> {
-  return Promise.all([
-    checkEmbedStaleness(engine),
-    checkEntityLinkCoverage(engine),
-    checkTimelineCoverage(engine),
-    checkTakesCount(engine),
+  const checks = [
+    checkEmbedStaleness,
+    checkEntityLinkCoverage,
+    checkTimelineCoverage,
+    checkTakesCount,
     // v0.42 type-unification (T13-T15): 3 new checks added to onboard.
-    checkPackUpgradeAvailable(engine),
-    checkTypeProliferation(engine),
-    checkDanglingAliases(engine),
-  ]);
+    checkPackUpgradeAvailable,
+    checkTypeProliferation,
+    checkDanglingAliases,
+  ];
+  const results: OnboardCheckResult[] = [];
+  for (const check of checks) {
+    const result = await check(engine);
+    opts?.onSettled?.(result.check.name);
+    results.push(result);
+  }
+  return results;
 }
 
 // ===========================================================================
