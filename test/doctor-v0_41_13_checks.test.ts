@@ -40,6 +40,10 @@ function runDoctor(): DoctorEnvelope {
       cwd: process.cwd(),
       encoding: 'utf8',
       timeout: 60000,
+      // Bun snapshots environment state for subprocesses unless it is passed
+      // explicitly. Preserve the test preloads' scratch audit/home paths so
+      // this probe never reads the operator's live audit trail.
+      env: process.env,
     },
   );
   if (result.error) throw result.error;

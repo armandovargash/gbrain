@@ -43,6 +43,16 @@ describe('classifyLiveness (Codex #9)', () => {
   });
 });
 
+describe('parseProcessElapsedMs', () => {
+  test('parses the portable ps elapsed-time shapes without wall-clock timezone math', async () => {
+    const { parseProcessElapsedMs } = await reg();
+    expect(parseProcessElapsedMs('00:07')).toBe(7_000);
+    expect(parseProcessElapsedMs('01:02:03')).toBe(3_723_000);
+    expect(parseProcessElapsedMs('2-01:02:03')).toBe(176_523_000);
+    expect(parseProcessElapsedMs('not-a-duration')).toBeNull();
+  });
+});
+
 describe('register + read round trip', () => {
   test('registerWorker writes under gbrainPath; readWorkers returns the live worker', async () => {
     const { registerWorker, readWorkers, workerRegistryDir } = await reg();

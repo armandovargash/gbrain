@@ -51,7 +51,7 @@
  */
 
 import {
-  existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync,
+  existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync,
 } from 'fs';
 import { dirname, join } from 'path';
 import { createHash, randomBytes } from 'crypto';
@@ -152,7 +152,14 @@ export type PushLockResult =
   | { acquired: false; holderPid: number | null };
 
 export function pushLockDir(repoRoot: string): string {
-  const hash = createHash('sha256').update(repoRoot).digest('hex').slice(0, 16);
+  let canonicalRoot = repoRoot;
+  try {
+    canonicalRoot = realpathSync(repoRoot);
+  } catch {
+    // The caller may be diagnosing a path that disappeared mid-run. Preserve
+    // the existing fail-soft behavior while canonicalizing every live repo.
+  }
+  const hash = createHash('sha256').update(canonicalRoot).digest('hex').slice(0, 16);
   return join(ensureGbrainHome(), 'locks', `push-${hash}.lock`);
 }
 
