@@ -5693,9 +5693,9 @@ export class PGLiteEngine implements BrainEngine {
     const scope: string[] | null = opts?.sourceIds ?? (opts?.sourceId ? [opts.sourceId] : null);
     const colId = await this.activeEmbeddingColId({ fallbackToLegacy: true });
     const { rows: [h] } = await this.db.query(`
-      WITH scoped_pages AS (
-        SELECT id, slug, frontmatter, deleted_at, source_id FROM pages p
+      WITH scoped_pages AS (SELECT p.id, p.slug, p.frontmatter, p.deleted_at, p.source_id FROM pages p JOIN sources s ON s.id = p.source_id
         WHERE ($1::text[] IS NULL OR p.source_id = ANY($1))
+          AND s.archived IS NOT TRUE AND COALESCE(s.config->>'strategy', '') <> 'code'
       ),
       entity_pages AS (
         -- #4280: quarantined entity shells are not served memory — keep them
@@ -5726,8 +5726,7 @@ export class PGLiteEngine implements BrainEngine {
         0 as orphan_pages,
         (SELECT count(*) FROM links l
          WHERE NOT EXISTS (SELECT 1 FROM pages p WHERE p.id = l.to_page_id)
-           AND ($1::text[] IS NULL
-                OR EXISTS (SELECT 1 FROM scoped_pages sp WHERE sp.id = l.from_page_id))
+           AND EXISTS (SELECT 1 FROM scoped_pages sp WHERE sp.id = l.from_page_id)
         ) as dead_links,
         -- Parity with postgres-engine.ts: same predicate as
         -- buildStaleChunkWhere / countStaleChunks, i.e. what 'embed --stale'
@@ -5740,9 +5739,8 @@ export class PGLiteEngine implements BrainEngine {
             AND NOT jsonb_exists(COALESCE(p.frontmatter, '{}'::jsonb), 'embed_skip')
         ) as missing_embeddings,
         (SELECT count(*) FROM links l
-          WHERE ($1::text[] IS NULL
-             OR (EXISTS (SELECT 1 FROM scoped_pages sp WHERE sp.id = l.from_page_id)
-                 AND EXISTS (SELECT 1 FROM scoped_pages sp WHERE sp.id = l.to_page_id)))) as link_count,
+          WHERE EXISTS (SELECT 1 FROM scoped_pages sp WHERE sp.id = l.from_page_id)
+            AND EXISTS (SELECT 1 FROM scoped_pages sp WHERE sp.id = l.to_page_id)) as link_count,
         (SELECT count(*) FROM entity_pages) as entity_page_count,
         -- gbrain#4153 consistency: an inbound link counts toward coverage
         -- only when its SOURCE page is live — the same endpoint-liveness rule
@@ -5772,10 +5770,11 @@ export class PGLiteEngine implements BrainEngine {
                       AND ($1::text[] IS NULL
                            OR EXISTS (SELECT 1 FROM pages fp WHERE fp.id = l.from_page_id AND fp.source_id = ANY($1))))
              )::int as link_count
-      FROM pages p
+      FROM pages p JOIN sources s ON s.id = p.source_id
       WHERE p.type IN ('entity', 'person', 'company') AND p.deleted_at IS NULL
         AND ${QUARANTINE_FILTER_FRAGMENT}
         AND ($1::text[] IS NULL OR p.source_id = ANY($1))
+        AND s.archived IS NOT TRUE AND COALESCE(s.config->>'strategy', '') <> 'code'
       ORDER BY link_count DESC
       LIMIT 5
     `, [scope]);
@@ -5809,10 +5808,11 @@ export class PGLiteEngine implements BrainEngine {
                           WHERE l.from_page_id = p.id AND tgt.deleted_at IS NULL
                             AND ($1::text[] IS NULL OR tgt.source_id = ANY($1)))) as islanded,
              EXISTS (SELECT 1 FROM timeline_entries te WHERE te.page_id = p.id) as has_timeline
-      FROM pages p
+      FROM pages p JOIN sources s ON s.id = p.source_id
       WHERE p.deleted_at IS NULL
         AND ${QUARANTINE_FILTER_FRAGMENT}
         AND ($1::text[] IS NULL OR p.source_id = ANY($1))
+        AND s.archived IS NOT TRUE AND COALESCE(s.config->>'strategy', '') <> 'code'
     `, [scope]);
 
     const r = h as Record<string, unknown>;

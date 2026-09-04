@@ -32,6 +32,8 @@ export interface SourceMetrics {
   name: string;
   local_path: string | null;
   federated: boolean;
+  /** Declared source purpose. Code sources use graph health, not memory-embedding health. */
+  strategy: 'markdown' | 'code' | 'auto' | null;
   total_pages: number;
   total_chunks: number;
   embedded_chunks: number;
@@ -327,6 +329,9 @@ export async function computeAllSourceMetrics(
       name: src.name,
       local_path: src.local_path,
       federated: cfg.federated === true,
+      strategy: cfg.strategy === 'markdown' || cfg.strategy === 'code' || cfg.strategy === 'auto'
+        ? cfg.strategy
+        : null,
       total_pages: pages,
       total_chunks: chunkStats.total,
       embedded_chunks: chunkStats.embedded,

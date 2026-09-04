@@ -95,6 +95,7 @@ export async function checkFederationHealth(engine: BrainEngine): Promise<Check>
       };
     }
     const metrics = await computeAllSourceMetrics(engine, sources);
+    const { resolveCodeReadiness } = await import('../../../core/code-graph-readiness.ts');
 
     const warns: string[] = [];
     const fails: string[] = [];
@@ -105,6 +106,28 @@ export async function checkFederationHealth(engine: BrainEngine): Promise<Check>
       // Fail thresholds first (most severe)
       if (m.lag_seconds !== null && m.lag_seconds > 24 * 3600) {
         fails.push(`${m.source_id}: stale ${Math.floor(m.lag_seconds / 3600)}h — run \`gbrain sync trigger --source ${m.source_id}\``);
+        continue;
+      }
+      // A code source has a different serving contract from a company-memory
+      // source. Its authoritative retrieval surface is the symbol/call graph;
+      // requiring every code chunk to carry a company-brain embedding both
+      // burns provider budget and lets an otherwise healthy code index make
+      // the memory score red. Keep the failure visible, but measure the thing
+      // users actually query: source-scoped graph readiness.
+      if (m.strategy === 'code') {
+        const graph = await resolveCodeReadiness(engine, {
+          kind: 'edge', count: 0, sourceId: m.source_id, remote: false,
+        });
+        if (graph.status === 'not_built' || graph.status === 'no_symbols') {
+          fails.push(`${m.source_id}: code graph ${graph.status} — run \`gbrain sync --strategy code --source ${m.source_id}\``);
+          continue;
+        }
+        if (!graph.ready) {
+          warns.push(`${m.source_id}: code graph ${graph.status} — run \`gbrain edges-backfill --source ${m.source_id}\``);
+        }
+        if (m.failed_jobs_24h >= 3) {
+          warns.push(`${m.source_id}: ${m.failed_jobs_24h} failures in 24h — check \`gbrain jobs list --status failed\``);
+        }
         continue;
       }
       if (m.embed_coverage_pct < 50 && m.total_chunks > 1000) {
@@ -140,7 +163,7 @@ export async function checkFederationHealth(engine: BrainEngine): Promise<Check>
     return {
       name: 'federation_health',
       status: 'ok',
-      message: `${metrics.length} source(s) healthy (parallel sync, async embed)`,
+      message: `${metrics.length} source(s) healthy (memory embeddings + code graphs)`,
     };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);

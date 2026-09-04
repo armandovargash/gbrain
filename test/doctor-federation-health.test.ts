@@ -2,7 +2,8 @@
  * Tests for src/commands/doctor.ts:checkFederationHealth (v0.40 T12).
  *
  * Three-state contract:
- *   ok    — single-source brain, or every federated source healthy
+ *   ok    — single-source brain, or every federated source healthy; code
+ *           sources are judged by graph readiness rather than embeddings
  *   warn  — lag > 1h + federated, coverage < 95% with chunks > 100, OR 3+ failures
  *   fail  — lag > 24h, OR coverage < 50% with chunks > 1000
  */
@@ -10,6 +11,7 @@ import { describe, test, expect, beforeAll, afterAll, beforeEach } from 'bun:tes
 import type { BrainEngine } from '../src/core/engine.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { configureGateway } from '../src/core/ai/gateway.ts';
+import { importCodeFile } from '../src/core/import-file.ts';
 import { checkFederationHealth } from '../src/commands/doctor.ts';
 
 let engine: PGLiteEngine;
@@ -124,5 +126,37 @@ describe('checkFederationHealth', () => {
     );
     const check = await checkFederationHealth(engine);
     expect(check.status).toBe('ok');
+  });
+
+  test('ready code source is healthy without semantic embeddings', async () => {
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, config, last_sync_at)
+       VALUES ('code-ready', 'code-ready', '{"federated":true,"strategy":"code"}', NOW())`,
+    );
+    await importCodeFile(engine, 'src/ready.ts', 'export function ready() { return 1; }', {
+      noEmbed: true, sourceId: 'code-ready',
+    });
+    await engine.executeRaw(`UPDATE content_chunks SET edges_backfilled_at = NOW()`);
+
+    const check = await checkFederationHealth(engine);
+    expect(check.status).toBe('ok');
+    expect(check.message).toContain('code graphs');
+    expect(check.message).not.toContain('embed coverage');
+  });
+
+  test('incomplete code source stays visible as a graph warning', async () => {
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, config, last_sync_at)
+       VALUES ('code-indexing', 'code-indexing', '{"federated":true,"strategy":"code"}', NOW())`,
+    );
+    await importCodeFile(engine, 'src/indexing.ts', 'export function indexing() { return 1; }', {
+      noEmbed: true, sourceId: 'code-indexing',
+    });
+
+    const check = await checkFederationHealth(engine);
+    expect(check.status).toBe('warn');
+    expect(check.message).toContain('code graph indexing');
+    expect(check.message).toContain('gbrain edges-backfill --source code-indexing');
+    expect(check.message).not.toContain('embed coverage');
   });
 });
